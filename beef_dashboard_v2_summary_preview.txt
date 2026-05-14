@@ -1,0 +1,43 @@
+EU Beef Dashboard Summary
+Source URL: https://agridata.ec.europa.eu/extensions/DashboardBeef/Dashboard.html
+Dashboard: Beef Dashboard
+Dashboard update: 10/04/2026
+Captured at: 2026-04-13T14:04:44Z
+Coverage: 22 sheets, 44 response payloads, 1373 websocket payloads, 58 extracted tables
+
+Carcasse Prices
+Week: 2026-13
+- A URO: 716.7 (WoW +0.6%, MoM -0.7%, YoY +15.5%)
+- ACZ URO: 714.6 (WoW +0.2%, MoM -1.0%, YoY +12.2%)
+- C URO: 701.3 (WoW -0.9%, MoM -3.5%, YoY -4.8%)
+- Z URO: 714.1 (WoW -0.2%, MoM -0.1%, YoY +13.3%)
+
+Live Animal Prices
+Week: 2026-13
+- Male Calves Dairy Type (€/head): 291.3 (WoW -1.7%, MoM +9.6%, YoY +35.8%)
+- Male Calves Beef Type (€/head): 485.9 (WoW -0.3%, MoM +5.5%, YoY +37.8%)
+- Young Store Cattle (€/Kg): 5.6 (WoW -0.4%, MoM -0.2%, YoY +22.0%)
+- Yearling Male Store Cattle (€/Kg): 7.1 (WoW +2.8%, MoM +12.1%, YoY +23.6%)
+- Yearling Female Store Cattle (€/Kg): 5.4 (WoW -0.1%, MoM +2.8%, YoY +30.7%)
+- Calves slaughtered <8M (€/100): 850.2 (WoW -1.1%, MoM -3.5%, YoY +10.3%)
+
+Production
+- Young cattle: EU -11.4%, EU+UK -11.4%
+- Bovine meat: EU -4.1%, EU+UK -4.1%
+- Bullock: EU -2.2%, EU+UK -2.2%
+- Heifer: EU -2.5%, EU+UK -2.5%
+- Bull: EU -2.4%, EU+UK -2.4%
+- Cow: EU -4.9%, EU+UK -4.9%
+- Calf: EU -8.6%, EU+UK -8.6%
+- Latest monthly production point: Dec 2025 = 524.61 (1,000 tonnes)
+- Same month previous year: Dec 2024 = 539.33 (-2.7% YoY)
+
+Trade
+- Main exporters in 2026: Brazil 279.8k t; India 170.2k t; Australia 159.4k t; United States 96.8k t; Argentina 75.4k t
+- Main importers in 2026: China+HK 412.3k t; United States 236.3k t; South Korea 92.9k t; Japan 48.1k t; Vietnam (preliminary) 2 44.6k t
+
+Key Developments
+- Strongest YoY price increase: Male Calves Beef Type (€/head) (+37.8%)
+- Strongest short-term weekly move: Yearling Male Store Cattle (€/Kg) (+2.8%)
+- Weakest monthly momentum: C URO (-3.5%)
+- Largest production contraction: Young cattle (EU -11.4%)

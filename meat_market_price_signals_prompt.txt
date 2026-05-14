@@ -1,0 +1,261 @@
+You are a senior meat market analyst for Germany and Europe.
+
+Use ONLY the source material provided below.
+Do not invent facts.
+Do not use outside knowledge.
+
+Task:
+1. Identify the 3 to 5 most important current developments across pork news and beef market dashboard signals.
+2. Focus only on developments that could materially affect near-term meat prices or meat market expectations.
+3. Combine overlapping signals where appropriate.
+4. Output only bullet lines.
+5. Start each line with:
+   + if the fact indicates upward price pressure
+   - if the fact indicates downward price pressure
+6. End every line with source references in square brackets, for example:
+   [Brave / reuters.com; Agridata / PricesC table]
+7. Prefer concrete source labels that are present in the provided material.
+8. No intro.
+9. No conclusion.
+10. No numbering.
+11. No neutral bullets.
+12. Keep each line compact but specific.
+13. Whenever you mention a price change, production change, or percentage change, always state the comparison period explicitly in the same bullet (for example: WoW, MoM, YoY, versus previous week, versus same month last year).
+14. Never mention a percentage without its comparison basis.
+15. If the source does not clearly provide the comparison period, say "comparison period not stated in source" or leave the percentage out.
+16. For dashboard signals, preserve the exact timing label provided in the source (WoW, MoM, YoY).
+
+Source material:
+
+PORK NEWS SUMMARY
+Schweinefleisch – relevante News-Signale
+Zeitraum: 2026-04-09to2026-04-16
+
+- Die Schweineschlachtungen in den Niederlanden sind um 7,4 % gesunken, was auf ein verringertes Angebot aus einem großen Exportland hindeutet. (Quelle: topagrar.com) (+)
+- Die Erzeugerpreise für Schweine sind gesunken. (Quelle: topagrar.com) (-)
+- Die Afrikanische Schweinepest breitet sich in Südwestfalen und anderen Regionen in Nordrhein-Westfalen aus, was die Versorgung gefährdet und zu Gegenmaßnahmen führt. (Quelle: wp.de, topagrar.com) (+)
+
+Verwendete Artikel:
+- EU-Schlachtschweinemärkte: Zaghafte Nachfrage stabilisiert Schweinepreise
+  Quelle: afz.fleischwirtschaft.de
+  URL: https://afz.fleischwirtschaft.de/maerkte/nachrichten/eu-schlachtschweinemaerkte-zaghafte-nachfrage-stabilisiert-schweinepreise-65610
+- Warum Bauern trotz steigender Lebensmittelpreise ums Überleben kämpfen
+  Quelle: ndr.de
+  URL: https://ndr.de/studio16/teurer-einkauf-warum-kommt-geld-nicht-bei-bauern-an,landwirtschaft-242.html
+- Schweineschlachtungen in den Niederlanden sinken um 7,4 Prozent deutlich | top agrar
+  Quelle: topagrar.com
+  URL: https://topagrar.com/schwein/news/niederlande-schlachten-deutlich-weniger-schweine-20024736.html
+- Rinderpreise: Landwirte bekommen weniger Geld für Bullen – wegen Preisdruck der Schlachter | agrarheute.com
+  Quelle: agrarheute.com
+  URL: https://agrarheute.com/markt/tiere/rinderpreise-landwirte-bekommen-weniger-geld-fuer-bullen-wegen-preisdruck-schlachter-640198
+- Mehr als ein Siegel: So gelingt die Vermarktung von Bioschweinen | Bayerisches Landwirtschaftliches Wochenblatt
+  Quelle: wochenblatt-dlv.de
+  URL: https://wochenblatt-dlv.de/maerkte/mehr-siegel-so-gelingt-vermarktung-bioschweinen-584579
+- Österreich: Schweinebauern spenden über 7.600 Fleischpakete | Regionews.at
+  Quelle: regionews.at
+  URL: https://regionews.at/newsdetail/Schweinebauern_spenden_ueber_7_600_Fleischpakete-685368
+- Fleisch zum halben Preis bei der Migros: Was du wissen musst (B+)
+  Quelle: blick.ch
+  URL: https://blick.ch/wirtschaft/migros-gefriert-fleisch-vor-ablauf-ein-dieser-gruene-aufkleber-hilft-dir-sparen-und-was-du-sonst-noch-wissen-musst-id21863382.html
+- Eier werden teurer: Krankheiten und hohe Nachfrage drücken das Angebot
+  Quelle: www.t-online.de
+  URL: https://www.t-online.de/leben/aktuelles/id_101204992/eier-werden-teurer-krankheiten-und-hohe-nachfrage-druecken-das-angebot.html
+- Fleischverzehr Deutschland 2025: Verbrauch steigt – wie entwickelt sich der Konsum 2026? | top agrar
+  Quelle: topagrar.com
+  URL: https://topagrar.com/markt/news/fleischkonsum-steigt-halt-der-trend-auch-2026-20024672.html
+- Bio-Lebensmittel: Nachfrage wächst schneller als Angebot
+  Quelle: www.agrarzeitung.de
+  URL: https://www.agrarzeitung.de/nachrichten/wirtschaft/bio-lebensmittel-nachfrage-waechst-schneller-als-angebot-156654
+- Sauenhalter paart gezielt an – das senkt Kosten und steigert Erlöse | agrarheute.com
+  Quelle: agrarheute.com
+  URL: https://agrarheute.com/tier/schwein/sauenhalter-paart-gezielt-senkt-kosten-steigert-erloese-640204
+- Erzeugerpreise landwirtschaftlicher Produkte steigen langsam wieder | top agrar
+  Quelle: topagrar.com
+  URL: https://topagrar.com/markt/news/erzeugerpreise-landwirtschaftlicher-produkte-steigen-langsam-wieder-20024712.html
+- Schnitzel für 35 Euro: Deutscher Starkoch ordnet ein – "fairer Preis" - FOCUS online
+  Quelle: focus.de
+  URL: https://focus.de/finanzen/schnitzel-fuer-35-euro-deutscher-starkoch-ordnet-ein-fairer-preis_f3d98347-3097-4506-a4da-1850cf1dace7.html
+- Starkoch rechtfertigt 35 Euro für Wiener Schnitzel: „Fairer Preis“ - CHIP
+  Quelle: chip.de
+  URL: https://chip.de/news/supermaerkte-lebensmittel/starkoch-rechtfertigt-35-euro-fuer-wiener-schnitzel-fairer-preis_e9f84f1b-be27-4e07-ae64-3b32054dee2c.html
+- Preisschock auf dem Teller: Pattayas Märkte stöhnen unter teurem Schweinefleisch - .
+  Quelle: schoenes-thailand.at
+  URL: https://schoenes-thailand.at/2026/04/09/preisschock-auf-dem-teller-pattayas-maerkte-stoehnen-unter-teurem-schweinefleisch
+- Jungbullenpreise aktuell: VEZG meldet Rückgang – Süddeutschland 15 Cent unter Nordwesten | top agrar
+  Quelle: topagrar.com
+  URL: https://topagrar.com/markt/news/jungbullen-unter-druck-erzeugerpreise-im-suden-sturzen-ab-20024717.html
+- Tierseuche: Wildgans bei Hoyersburg mit Geflügelpest infiziert
+  Quelle: www.volksstimme.de
+  URL: https://www.volksstimme.de/lokal/salzwedel/wildgans-bei-hoyersburg-mit-geflugelpest-infiziert-4232832
+- Schweinepest tötet immer mehr Tiere: Jetzt soll diese Maßnahme helfen
+  Quelle: wp.de
+  URL: https://wp.de/sauer-und-siegerland/article411727144/afrikanische-schweinepest-jetzt-soll-diese-massnahme-helfen.html
+- Afrikanische Schweinepest in Nordrhein-Westfalen: Sauerland plant zweiten Schutzzaun gegen ASP | top agrar
+  Quelle: www.topagrar.com
+  URL: https://www.topagrar.com/schwein/news/nrw-errichtet-zweiten-asp-schutzzaun-in-sperrzone-ii-20024786.html
+- Virus: Tierseuche breitet sich in neuen Regionen in Deutschland aus
+  Quelle: www.karlsruhe-insider.de
+  URL: https://www.karlsruhe-insider.de/news/virus-tierseuche-breitet-sich-in-neuen-regionen-in-deutschland-aus-294542
+
+PORK NEWS SOURCE ITEMS
+1. Title: EU-Schlachtschweinemärkte: Zaghafte Nachfrage stabilisiert Schweinepreise
+   Source label: Brave / afz.fleischwirtschaft.de
+   Age: vor 3 Tagen
+   URL: https://afz.fleischwirtschaft.de/maerkte/nachrichten/eu-schlachtschweinemaerkte-zaghafte-nachfrage-stabilisiert-schweinepreise-65610
+   Description: Das saisonal reduzierte Angebot an Schlachtschweinen und eine schwache Nachfrage halten sich die Waage. BERLIN Das Geschäft mit Schweinefleisch kommt auch nach Ostern noch nicht in Fahrt.So entwickeln sich die Schweinepreise an den wichtigsten Märkten der EU.
+   Snippet: Das Geschäft mit Schweinefleisch kommt auch nach Ostern noch nicht in Fahrt. So entwickeln sich die Schweinepreise an den wichtigsten Märkten der EU.
+
+2. Title: Warum Bauern trotz steigender Lebensmittelpreise ums Überleben kämpfen
+   Source label: Brave / ndr.de
+   Age: vor 1 Tag
+   URL: https://ndr.de/studio16/teurer-einkauf-warum-kommt-geld-nicht-bei-bauern-an,landwirtschaft-242.html
+   Description: Lebensmittel werden teurer - deutlich. Doch viele Höfe in Norddeutschland kämpfen ums Überleben. Wie passt das zusammen?
+   Snippet: Lebensmittelpreise steigen deutlich, doch viele Bauern in der Landwirtschaft kämpfen ums überleben. Wie passt das zusammen? Ein Blick auf Preise, Strukturen der Landwirtschaft und ein System, das für viele Bauern kaum noch funktioniert.
+   Snippet: Landwirte verkaufen keine fertigen Produkte, sondern Rohstoffe: Milch, Getreide, Tiere. Und den Preis bestimmen sie nicht selbst. Er entsteht an Börsen bzw. auf dem Weltmarkt, vor allem durch Angebot und Nachfrage. Gibt es viel Angebot und wenig Nachfrage, fällt der Preis, egal wie hoch die Kosten für den Hof gerade sind.
+
+3. Title: Schweineschlachtungen in den Niederlanden sinken um 7,4 Prozent deutlich | top agrar
+   Source label: Brave / topagrar.com
+   Age: vor 9 Stunden
+   URL: https://topagrar.com/schwein/news/niederlande-schlachten-deutlich-weniger-schweine-20024736.html
+   Description: Die Schlachtzahlen in den Niederlanden sind zu Jahresbeginn 2026 um 7,4 % gesunken. Die staatlichen Ausstiegsprogramme aus der Tierhaltung zeigen ihre Wirkung.
+   Snippet: Trotz des knapperen Angebots sei in den Niederlanden nicht automatisch mit steigenden Preisen zu rechnen. Denn die niederländischen Schlachtunternehmen sind stark exportorientiert. Laut Forschenden der Universität Wageningen liegt der niederländische Selbstversorgungsgrad von Schweinefleisch bei rund 300 %. Zum Vergleich: In Deutschland liegt er bei 139 %. Die Branche produziert also weitaus mehr, als im Inland verbraucht wird.
+   Snippet: Im Spitzenjahr 2021 wurden noch mehr als 4,5 Mio. Schweine geschlachtet. Heute liegt das Niveau rund 780.000 Tiere beziehungsweise rund 17 % darunter. Allerdings wurden die Tiere zuletzt schwerer geschlachtet, sodass die gesamte Schweinefleischproduktion weniger stark gesunken ist.
+
+4. Title: Rinderpreise: Landwirte bekommen weniger Geld für Bullen – wegen Preisdruck der Schlachter | agrarheute.com
+   Source label: Brave / agrarheute.com
+   Age: vor 2 Tagen
+   URL: https://agrarheute.com/markt/tiere/rinderpreise-landwirte-bekommen-weniger-geld-fuer-bullen-wegen-preisdruck-schlachter-640198
+   Description: Die Rinderpreise geben dem Preisdruck der Schlachter nach. Landwirte bekommen weniger Geld für Bullen und höherwertige Färsen.
+   Snippet: Wie Marktbeobachter berichten, sei die Nachfrage nach den Ostertagen zurückhaltend. Obwohl das Angebot an Jungbullen insgesamt noch immer gering sei, reiche es aus, um das verhaltene Kaufinteresse zu bedienen. Bei den Schlachtkühen stützt das knappe Angebot die Preise, sodass die Tiere stetig abgesetzt werden können.
+   Snippet: Am Rindermarkt treibt das knappe Angebot die Preise auf ein neues Rekordniveau.
+
+5. Title: Mehr als ein Siegel: So gelingt die Vermarktung von Bioschweinen | Bayerisches Landwirtschaftliches Wochenblatt
+   Source label: Brave / wochenblatt-dlv.de
+   Age: vor 1 Tag
+   URL: https://wochenblatt-dlv.de/maerkte/mehr-siegel-so-gelingt-vermarktung-bioschweinen-584579
+   Description: Edeka zeigt, wie Bio-Schweinefleisch läuft: feste Preise, lange Verträge – und warum Tierwohl allein nicht genügt.
+   Snippet: Die Bioland-Schweinefachtagung in Bad Boll von Bioland und dem Thünen-Institut hat anhand von praktischen Beispielen gezeigt, wohin sich die Vermarktung von Bioschweinefleisch entwickeln kann. Jürgen Mäder, Vorstand und Geschäftsführer bei Edeka Südwest, gab einen Einblick in die Vermarktung von Schweinefleisch.
+
+6. Title: Österreich: Schweinebauern spenden über 7.600 Fleischpakete | Regionews.at
+   Source label: Brave / regionews.at
+   Age: vor 2 Tagen
+   URL: https://regionews.at/newsdetail/Schweinebauern_spenden_ueber_7_600_Fleischpakete-685368
+   Description: Die Versorgung mit hochwertigen, regionalen Lebensmitteln ist ein zentraler Auftrag der österreichischen Landwirtschaft. Insbesondere in Zeiten globaler Krisen stellt der Lebensmitteleinkauf für viele Menschen eine große Herausforderung dar. Mit der Spendenaktion „Schweinehaltung hilft“ ...
+   Snippet: Die Versorgung mit hochwertigen, regionalen Lebensmitteln ist ein zentraler Auftrag der österreichischen Landwirtschaft. Insbesondere in Zeiten globaler Krisen stellt der Lebensmitteleinkauf für viele Menschen eine große Herausforderung dar. Mit der Spendenaktion „Schweinehaltung hilft“ setzen Österreichs Schweinebäuerinnen und -bauern ein starkes Zeichen der Solidarität.
+   Snippet: Regionale Nachrichten aus Österreich und den Bundesländern
+
+7. Title: Fleisch zum halben Preis bei der Migros: Was du wissen musst (B+)
+   Source label: Brave / blick.ch
+   Age: vor 4 Tagen
+   URL: https://blick.ch/wirtschaft/migros-gefriert-fleisch-vor-ablauf-ein-dieser-gruene-aufkleber-hilft-dir-sparen-und-was-du-sonst-noch-wissen-musst-id21863382.html
+   Description: Ein Entrecote zum halben Preis klingt erst einmal verlockend. Was genau steckt hinter dem neuen Angebot der Migros mit dem Tiefkühl-Fleisch? Und was die Konkurrenz mit Fleisch macht, welches das Ende der Haltbarkeit erreicht hat.
+   Snippet: Gekennzeichnet sind die Verpackungen mit einem grünen Kleber. Die Genossenschaft Ostschweiz hat das Konzept bereits im Vorjahr getestet. «Die nahezu 100-Prozent-Abverkaufsquote des eingefrorenen Fleischs zeigt, dass das Angebot bei den Konsumentinnen und Konsumenten gut ankommt», teilt ein Sprecher auf Anfrage mit.
+   Snippet: Seit März wird das Angebot bei der Migros schrittweise auf alle Filialen ausgeweitet. Da dafür die Genossenschaften zuständig sind, weiss die Migros-Zentrale nicht, wo es das Angebot bereits gibt.
+
+8. Title: Eier werden teurer: Krankheiten und hohe Nachfrage drücken das Angebot
+   Source label: Brave / www.t-online.de
+   Age: vor 1 Woche
+   URL: https://www.t-online.de/leben/aktuelles/id_101204992/eier-werden-teurer-krankheiten-und-hohe-nachfrage-druecken-das-angebot.html
+   Description: In manchen Supermarktregalen fehlen derzeit Eier. Händler sprechen von Lieferengpässen. Was genau dahintersteckt und was die Folgen sind.
+   Snippet: Der Edeka-Verbund sieht derzeit keine strukturellen Probleme bei der Versorgung mit Eiern – verweist jedoch auf regionale Unterschiede und eine zuletzt gestiegene Nachfrage. Wie das Unternehmen auf Anfrage mitteilt, arbeitet Edeka seit Jahren eng mit einer Vielzahl regionaler Erzeugerbetriebe zusammen.
+   Snippet: Dennoch kann es aktuell vereinzelt zu Engpässen kommen. Die Verfügbarkeit werde "unter anderem durch punktuell erhöhte Nachfrage beeinflusst" und könne daher regional variieren, heißt es. Konkrete Gründe für die gestiegene Nachfrage nennt das Unternehmen nicht.
+
+9. Title: Fleischverzehr Deutschland 2025: Verbrauch steigt – wie entwickelt sich der Konsum 2026? | top agrar
+   Source label: Brave / topagrar.com
+   Age: vor 5 Tagen
+   URL: https://topagrar.com/markt/news/fleischkonsum-steigt-halt-der-trend-auch-2026-20024672.html
+   Description: 54,9 kg Fleisch pro Kopf – der Verzehr ist 2025 zum dritten Mal gestiegen. Doch wie nachhaltig ist die Erholung?
+   Snippet: Allerdings sind dem Wachstum klare Grenzen gesetzt. Strukturelle Trends wie ein bewussterer Umgang mit Fleisch und die wachsende Nachfrage nach Fleischalternativen dürften das Potenzial nach oben begrenzen.
+   Snippet: Haupttreiber des jüngsten Anstiegs ist Geflügelfleisch, das mit 14,7 kg pro Kopf ein Allzeithoch erreichte und rund 27 % des Gesamtverzehrs ausmachte. Schweinefleisch stabilisierte sich auf hohem Niveau bei 28,3 kg, Rind- und Kalbfleisch legte leicht auf 9,7 kg zu.
+
+10. Title: Bio-Lebensmittel: Nachfrage wächst schneller als Angebot
+   Source label: Brave / www.agrarzeitung.de
+   Age: vor 1 Woche
+   URL: https://www.agrarzeitung.de/nachrichten/wirtschaft/bio-lebensmittel-nachfrage-waechst-schneller-als-angebot-156654
+   Description: Der deutsche Bio-Markt setzt seinen Wachstumskurs fort und zeigt sich zunehmend stabil, während die heimische Produktion hinterherhinkt. Eine Analyse.
+   Snippet: Jetzt az Digital Angebot wählen und weiterlesen!
+
+11. Title: Sauenhalter paart gezielt an – das senkt Kosten und steigert Erlöse | agrarheute.com
+   Source label: Brave / agrarheute.com
+   Age: vor 1 Tag
+   URL: https://agrarheute.com/tier/schwein/sauenhalter-paart-gezielt-senkt-kosten-steigert-erloese-640204
+   Description: Vom Rauschedetektor bis zur Genetik: Diese Strategien bringen Schweinehalter wirklich voran.
+   Snippet: Bei den Ferkeln ist die Dreifach-Impfung gegen Mykoplasmen, Circo und PRRS zwischen dem 14. und 20. Lebenstag Standard. „Beim Impfen der Tiere mache ich keine Kompromisse, egal wie die Preissituation auf dem Markt gerade ist“, betont Michael Bissinger.
+   Snippet: Wie schafft es ein Schweinehalter, trotz steigender Kosten, schwankender Preise und wachsendem Druck am Markt konstant wirtschaftlich zu bleiben?
+
+12. Title: Erzeugerpreise landwirtschaftlicher Produkte steigen langsam wieder | top agrar
+   Source label: Brave / topagrar.com
+   Age: vor 3 Tagen
+   URL: https://topagrar.com/markt/news/erzeugerpreise-landwirtschaftlicher-produkte-steigen-langsam-wieder-20024712.html
+   Description: Die Preise für Obst, Getreide, Kartoffeln, Milch, Schweine und Futterpflanzen sind gesunken, für Gemüse, Rinder, Geflügel und Eier aber gestiegen.
+   Snippet: Die Preise für pflanzliche Erzeugnisse sanken im Februar 2026 um 11,6 % gegenüber Februar 2025. Die Preise für Tiere und tierische Erzeugnisse verbilligten sich um 10,3 % gegenüber dem Vorjahresmonat. Im Vergleich zum Vormonat entwickelten sich die Preise für Produkte aus pflanzlicher und tierischer Erzeugung im Februar 2026 gegenläufig.
+   Snippet: Der Preisrückgang bei pflanzlichen Produkten um 11,6 % im Vergleich zum Vorjahresmonat ist erneut unter anderem auf die gesunkenen Preise für Speisekartoffeln zurückzuführen. Diese waren im Februar 2026 um 54,2 % niedriger als im Februar 2025. Im Januar 2026 hatte die Vorjahresveränderung bei -49,8 %, im Dezember 2025 bei -48,0 % gelegen.
+
+13. Title: Schnitzel für 35 Euro: Deutscher Starkoch ordnet ein – "fairer Preis" - FOCUS online
+   Source label: Brave / focus.de
+   Age: vor 1 Woche
+   URL: https://focus.de/finanzen/schnitzel-fuer-35-euro-deutscher-starkoch-ordnet-ein-fairer-preis_f3d98347-3097-4506-a4da-1850cf1dace7.html
+   Description: Das Schnitzel Wiener Art sieht ... aus Schweinefleisch zubereitet – meist Rücken, Keule oder Filet. Weil hier kein Kalb verwendet wird, darf es nicht „Wiener Schnitzel“ heißen und muss auf der Speisekarte entsprechend gekennzeichnet sein. Beide Varianten sind paniert – der Unterschied liegt im Tier und damit auch im Preis...
+   Snippet: Das Schnitzel Wiener Art sieht auf den ersten Blick zwar ähnlich aus, wird aber in der Regel aus Schweinefleisch zubereitet – meist Rücken, Keule oder Filet. Weil hier kein Kalb verwendet wird, darf es nicht „Wiener Schnitzel“ heißen und muss auf der Speisekarte entsprechend gekennzeichnet sein. Beide Varianten sind paniert – der Unterschied liegt im Tier und damit auch im Preis.
+   Snippet: Sind 35 Euro für ein Wiener Schnitzel angemessen? Für Starkoch Johann Lafer ein „fairer Preis“, weil es Präzisionsarbeit und hochwertige Zutaten erfordere.
+
+14. Title: Starkoch rechtfertigt 35 Euro für Wiener Schnitzel: „Fairer Preis“ - CHIP
+   Source label: Brave / chip.de
+   Age: vor 1 Woche
+   URL: https://chip.de/news/supermaerkte-lebensmittel/starkoch-rechtfertigt-35-euro-fuer-wiener-schnitzel-fairer-preis_e9f84f1b-be27-4e07-ae64-3b32054dee2c.html
+   Description: Das ähnlich aussehende Schnitzel ... aus Schweinefleisch zubereitet, typischerweise aus Rücken, Keule oder Filet. Weil hierbei kein Kalb verwendet wird, darf es nicht als „Wiener Schnitzel“ bezeichnet werden und muss auf der Speisekarte entsprechend gekennzeichnet sein. Beide Varianten sind paniert – der große Unterschied liegt im verwendeten Tier und damit häufig auch im Preis...
+   Snippet: Das ähnlich aussehende Schnitzel Wiener Art wird dagegen in der Regel aus Schweinefleisch zubereitet, typischerweise aus Rücken, Keule oder Filet. Weil hierbei kein Kalb verwendet wird, darf es nicht als „Wiener Schnitzel“ bezeichnet werden und muss auf der Speisekarte entsprechend gekennzeichnet sein. Beide Varianten sind paniert – der große Unterschied liegt im verwendeten Tier und damit häufig auch im Preis.
+   Snippet: Sind bis zu 35 Euro für ein Wiener Schnitzel gerechtfertigt? Für Starkoch Johann Lafer lautet die Antwort eindeutig: ja. Die Zutaten seien kostspielig, die Zubereitung aufwendig.
+
+15. Title: Preisschock auf dem Teller: Pattayas Märkte stöhnen unter teurem Schweinefleisch - .
+   Source label: Brave / schoenes-thailand.at
+   Age: vor 1 Woche
+   URL: https://schoenes-thailand.at/2026/04/09/preisschock-auf-dem-teller-pattayas-maerkte-stoehnen-unter-teurem-schweinefleisch
+   Description: Wo sonst das geschäftige Treiben der Hausfrauen und Köche die Luft erfüllt, blicken Kunden heute skeptisch auf die Preisschilder. Die Schweinefleischpreise in Thailand befinden sich in einer rasanten Aufwärtsspirale, die kein Halten zu kennen scheint und besonders die Menschen in der ...
+   Snippet: Wo sonst das geschäftige Treiben der Hausfrauen und Köche die Luft erfüllt, blicken Kunden heute skeptisch auf die Preisschilder. Die Schweinefleischpreise in Thailand befinden sich in einer rasanten Aufwärtsspirale, die kein Halten zu kennen scheint und besonders die Menschen in der Touristenmetropole Pattaya hart trifft.
+   Snippet: PATTAYA, Thailand – In den Gassen des Amorn-Marktes herrscht gedrückte Stimmung. Wo sonst das geschäftige Treiben der Hausfrauen und Köche die Luft erfüllt…
+
+BEEF DASHBOARD SUMMARY
+EU Beef Dashboard Summary
+Source URL: https://agridata.ec.europa.eu/extensions/DashboardBeef/Dashboard.html
+Dashboard: Beef Dashboard
+Dashboard update: 10/04/2026
+Captured at: 2026-04-16T16:26:38Z
+Coverage: 22 sheets, 44 response payloads, 1363 websocket payloads, 58 extracted tables
+
+Carcasse Prices
+Week: 2026-13
+- A URO: 716.7 (WoW +0.6%, MoM -0.7%, YoY +15.5%)
+- ACZ URO: 714.6 (WoW +0.2%, MoM -1.0%, YoY +12.2%)
+- C URO: 701.3 (WoW -0.9%, MoM -3.5%, YoY -4.8%)
+- Z URO: 714.1 (WoW -0.2%, MoM -0.1%, YoY +13.3%)
+
+Live Animal Prices
+Week: 2026-13
+- Male Calves Dairy Type (€/head): 291.3 (WoW -1.7%, MoM +9.6%, YoY +35.8%)
+- Male Calves Beef Type (€/head): 485.9 (WoW -0.3%, MoM +5.5%, YoY +37.8%)
+- Young Store Cattle (€/Kg): 5.6 (WoW -0.4%, MoM -0.2%, YoY +22.0%)
+- Yearling Male Store Cattle (€/Kg): 7.1 (WoW +2.8%, MoM +12.1%, YoY +23.6%)
+- Yearling Female Store Cattle (€/Kg): 5.4 (WoW -0.1%, MoM +2.8%, YoY +30.7%)
+- Calves slaughtered <8M (€/100): 850.2 (WoW -1.1%, MoM -3.5%, YoY +10.3%)
+
+Production
+- Young cattle: EU -11.4%, EU+UK -11.4%
+- Bovine meat: EU -4.1%, EU+UK -4.1%
+- Bullock: EU -2.2%, EU+UK -2.2%
+- Heifer: EU -2.5%, EU+UK -2.5%
+- Bull: EU -2.4%, EU+UK -2.4%
+- Cow: EU -4.9%, EU+UK -4.9%
+- Calf: EU -8.6%, EU+UK -8.6%
+- Latest monthly production point: Dec 2025 = 524.61 (1,000 tonnes)
+- Same month previous year: Dec 2024 = 539.33 (-2.7% YoY)
+
+Trade
+- Main exporters in 2026: Brazil 279.8k t; India 170.2k t; Australia 159.4k t; United States 96.8k t; Argentina 75.4k t
+- Main importers in 2026: China+HK 412.3k t; United States 236.3k t; South Korea 92.9k t; Japan 48.1k t; Vietnam (preliminary) 2 44.6k t
+
+Key Developments
+- Strongest YoY price increase: Male Calves Beef Type (€/head) (+37.8%)
+- Strongest short-term weekly move: Yearling Male Store Cattle (€/Kg) (+2.8%)
+- Weakest monthly momentum: C URO (-3.5%)
+- Largest production contraction: Young cattle (EU -11.4%)

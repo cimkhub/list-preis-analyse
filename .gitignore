@@ -1,0 +1,44 @@
+# Local secrets and auth tokens
+.env
+.onedrive_token.json
+
+# Python/runtime caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pip-cache/
+.tmp/
+.venv/
+.venv-new/
+.claude/
+*.egg-info/
+
+# OS/editor noise
+.DS_Store
+~$*
+
+# Generated pipeline data and reports
+data/
+images/
+parsed/
+reports/
+logs/
+embeddings/
+debug/
+example/
+Referenz Data/
+
+# Generated/binary outputs requested to keep out of git
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.xlsx
+*.xls
+*.csv
+
+# Large/generated analysis dumps
+*.jsonl
+beef_dashboard*.json
+brave_news_*.json
+meat_market_price_signals_raw.json

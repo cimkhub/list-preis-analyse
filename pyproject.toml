@@ -1,0 +1,27 @@
+[project]
+name = "birkenhof-pipeline"
+version = "0.1.0"
+description = "Automated food wholesaler price comparison pipeline"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.0",
+    "pyyaml",
+    "python-dotenv",
+    "requests",
+    "beautifulsoup4",
+    "playwright",
+    "google-genai",
+    "google-generativeai",
+    "pdf2image",
+    "Pillow",
+    "pandas",
+    "openpyxl",
+    "rapidfuzz",
+    "twilio",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+birkenhof = "main:main"

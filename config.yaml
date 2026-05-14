@@ -1,0 +1,71 @@
+suppliers:
+  metro:
+    enabled: true
+    location: "goslar"
+    url: "https://www.metro.de/standorte/goslar"
+    extraction_method: "vision_only"  # text_first | vision_only | web_scrape
+    price_type: "net"
+    default_vat_rate: 0.07
+    preferred_tier: "middle"
+
+  edeka:
+    enabled: true
+    location: "wernigerode"
+    region: "nord"
+    url: "https://www.edeka-foodservice.de/angebote/wernigerode"
+    extraction_method: "vision_only"
+    price_type: "gross"
+
+  selgros:
+    enabled: true
+    location: "braunschweig"
+    store_code: "307"
+    url: "https://www.selgros.de/markt/braunschweig"
+    extraction_method: "vision_only"
+    price_type: "gross"
+    relevant_categories:
+      - Fleisch
+      - "Bestes Fleisch"
+      - Seafood
+      - Fischtheke
+      - Frischeangebot
+      - "Obst & Gemüse"
+      - Roastbeef
+      - Gastroangebote
+      - "Gastro Angebote"
+      - Food
+
+  handelshof:
+    enabled: true
+    location: "hannover"
+    url: "https://www.handelshof.de/angebote/hannover"
+    extraction_method: "vision_only"
+    price_type: "gross"
+
+vision_api:
+  provider: "gemini"
+  model: "gemini-2.5-flash"
+  max_retries: 3
+  temperature: 0.1
+  max_concurrent_requests: 10
+
+pipeline:
+  image_dpi: 300
+  image_format: "png"
+  focus_categories:
+    - fisch
+    - fleisch
+    - obst_gemuese
+    - tk
+    - wurst
+    - mopro
+  fuzzy_match_threshold: 80
+
+storage:
+  base_dir: "."
+  data_dir: "data"
+  images_dir: "images"
+  parsed_dir: "parsed"
+  reports_dir: "reports"
+  reference_dir: "reference"
+  logs_dir: "logs"
