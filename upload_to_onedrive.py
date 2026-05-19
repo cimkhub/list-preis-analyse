@@ -83,26 +83,22 @@ def upload_to_onedrive(
     folder_path = target_folder or folder_path_from_onedrive_url(target_url)
     upload_name = filename or file_path.name
     print(f"Upload file: {file_path}")
-    print(f"Target folder: {folder_path}")
+    print(f"Target folder: {folder_path or 'shared link'}")
     token = get_access_token(client_id, tenant, token_cache)
     signed_in_user = get_signed_in_user(token)
     if signed_in_user:
         print(f"Signed in Microsoft account: {signed_in_user}")
-    elif is_personal_onedrive_folder(folder_path):
-        raise RuntimeError(
-            "Could not verify the signed-in Microsoft account. Delete .onedrive_token.json and sign in again; "
-            "the app now requests User.Read so it can prevent uploads to the wrong OneDrive."
-        )
     target_domain = target_domain_from_personal_folder(folder_path)
-    if target_domain and signed_in_user and not signed_in_user.lower().endswith(f"@{target_domain}"):
-        raise RuntimeError(
-            f"Signed-in account is {signed_in_user}, but the target OneDrive belongs to {target_domain}. "
-            "Delete .onedrive_token.json and sign in with the LIST account."
-        )
-    upload_url = graph_upload_url(target_url, folder_path, upload_name)
 
     print(f"Uploading as: {upload_name}")
-    response = upload_file_content(file_path, upload_url, token)
+    if is_sharepoint_sharing_link(target_url) or should_use_shared_folder_route(folder_path, target_domain, signed_in_user):
+        print("Using shared-folder upload route for external OneDrive access.")
+        upload_url = shared_folder_upload_url(target_url, upload_name, token)
+        response = upload_file_content(file_path, upload_url, token)
+    else:
+        upload_url = graph_upload_url(target_url, folder_path, upload_name)
+        response = upload_file_content(file_path, upload_url, token)
+
     if response.status_code >= 400 and parsed_sharepoint_url(target_url):
         print("Direct site upload failed; trying shared-folder resolution.")
         shared_upload_url = shared_folder_upload_url(target_url, upload_name, token)
@@ -134,6 +130,16 @@ def parsed_sharepoint_url(target_url: str) -> bool:
     return bool(parsed.hostname and parsed.hostname.endswith(".sharepoint.com"))
 
 
+def should_use_shared_folder_route(folder_path: str, target_domain: str, signed_in_user: str) -> bool:
+    if not is_personal_onedrive_folder(folder_path):
+        return False
+    if not target_domain:
+        return True
+    if not signed_in_user:
+        return True
+    return not signed_in_user.lower().endswith(f"@{target_domain}")
+
+
 def shared_folder_upload_url(target_url: str, upload_name: str, token: str) -> str:
     share_id = encode_sharing_url(target_url)
     response = requests.get(
@@ -142,8 +148,39 @@ def shared_folder_upload_url(target_url: str, upload_name: str, token: str) -> s
         timeout=REQUEST_TIMEOUT,
     )
     if response.status_code >= 400:
-        raise RuntimeError(f"Could not resolve OneDrive shared folder: {response.status_code} {response.text}")
+        print(f"Shared-link resolution failed: {response.status_code} {response.text}")
+        return shared_with_me_upload_url(target_url, upload_name, token)
     item = response.json()
+    return upload_url_for_drive_item(item, upload_name)
+
+
+def shared_with_me_upload_url(target_url: str, upload_name: str, token: str) -> str:
+    expected_path = folder_path_from_onedrive_url(target_url)
+    expected_folder = Path(expected_path).name.casefold() if expected_path else ""
+    response = requests.get(
+        f"{GRAPH_ROOT}/me/drive/sharedWithMe",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Could not list shared OneDrive items: {response.status_code} {response.text}")
+    items = response.json().get("value") or []
+    matches = []
+    if expected_folder:
+        matches = [
+            item for item in items
+            if str(item.get("name") or "").casefold() == expected_folder
+        ]
+    if not matches:
+        available = ", ".join(str(item.get("name") or "") for item in items[:20])
+        raise RuntimeError(
+            f"Shared folder '{expected_folder}' was not found in sharedWithMe. "
+            f"Available shared items: {available or 'none'}"
+        )
+    return upload_url_for_drive_item(matches[0].get("remoteItem") or matches[0], upload_name)
+
+
+def upload_url_for_drive_item(item: dict[str, object], upload_name: str) -> str:
     drive_id = (item.get("parentReference") or {}).get("driveId")
     item_id = item.get("id")
     if not drive_id or not item_id:
@@ -212,9 +249,20 @@ def folder_path_from_onedrive_url(url: str) -> str:
     query = parse_qs(urlparse(url).query)
     raw_id = (query.get("id") or [""])[0]
     folder = unquote(raw_id)
+    if not folder and is_sharepoint_sharing_link(url):
+        return ""
     if not folder:
         raise RuntimeError("Could not extract target folder from OneDrive URL. Use --target-folder.")
     return folder
+
+
+def is_sharepoint_sharing_link(url: str) -> bool:
+    parsed = urlparse(url)
+    return bool(
+        parsed.hostname
+        and parsed.hostname.endswith(".sharepoint.com")
+        and ("/:f:/" in parsed.path or "/:x:/" in parsed.path or "/:w:/" in parsed.path)
+    )
 
 
 def quote_graph_path(path: str) -> str:

@@ -36,6 +36,7 @@ Referenz Data/
 *.xlsx
 *.xls
 *.csv
+dashboard_review_bundle_*.zip
 
 # Large/generated analysis dumps
 *.jsonl

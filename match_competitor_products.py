@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter, defaultdict
@@ -1975,15 +1976,15 @@ def make_review_row(cluster: dict[str, Any], canonical_name: str, products: list
 
 def format_offer_cell(product: dict[str, Any]) -> str:
     lines = [
-        f"Produkt: {display_product_name(product) or 'unknown'}",
-        f"Marke: {product.get('brand') or 'unknown'}",
-        f"Beschreibung: {product.get('description') or 'unknown'}",
-        f"Herkunft: {product.get('origin') or 'unknown'}",
-        f"Menge: {amount_label(product)}",
         f"Preis: {price_label(product)}",
         f"Staffelpreise: {price_tiers_label(product)}",
         f"Preis/kg: {price_per_kg_label(product)}",
         f"Gültig: {valid_label(product)}",
+        f"Menge: {amount_label(product)}",
+        f"Produkt: {display_product_name(product) or 'unknown'}",
+        f"Marke: {product.get('brand') or 'unknown'}",
+        f"Beschreibung: {wrap_excel_text(product.get('description'), 42) or 'unknown'}",
+        f"Herkunft: {product.get('origin') or 'unknown'}",
         f"Quelle: {source_label(product)}",
     ]
     return "\n".join(line for line in lines if not line.endswith("unknown") and not line.endswith(": "))
@@ -1991,14 +1992,14 @@ def format_offer_cell(product: dict[str, Any]) -> str:
 
 def format_offer_cell_short(product: dict[str, Any]) -> str:
     parts = [
-        amount_label(product),
-        f"{format_german_number(product.get('price'))} €" if product.get("price") else "",
-        short_valid_label(product),
+        f"Preis: {format_german_number(product.get('price'))} €" if product.get("price") else "",
+        f"Gültig: {short_valid_label(product)}" if short_valid_label(product) else "",
+        f"Menge: {amount_label(product)}" if amount_label(product) != "unknown" else "",
     ]
     tiers = price_tiers_label(product)
     if tiers != "unknown":
-        parts.append(tiers.replace(" EUR", " €"))
-    return " | ".join(part for part in parts if part and part != "unknown")
+        parts.append(f"Staffel: {tiers.replace(' EUR', ' €')}")
+    return "\n".join(part for part in parts if part and part != "unknown")
 
 
 def display_product_name(product: dict[str, Any]) -> str:
@@ -2096,6 +2097,13 @@ def source_label(product: dict[str, Any]) -> str:
     return f"{source} page {page}".strip() if source or page else "unknown"
 
 
+def wrap_excel_text(value: Any, width: int) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return ""
+    return "\n".join(textwrap.wrap(text, width=width, break_long_words=False, break_on_hyphens=False))
+
+
 def build_attribute_debug_rows(df: pd.DataFrame, attributes: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for product in df.to_dict("records"):
@@ -2114,6 +2122,18 @@ LIST_YELLOW = "F7BC60"
 LIST_DARK = "27321F"
 LIST_LIGHT = "F6FAF0"
 LIST_LINE = "D9E6D0"
+CATEGORY_LABELS = {
+    "fisch": "Fisch",
+    "fleisch": "Fleisch",
+    "obst_gemuese": "Obst & Gemüse",
+    "obst_gemüse": "Obst & Gemüse",
+    "obst & gemüse": "Obst & Gemüse",
+    "obst und gemüse": "Obst & Gemüse",
+    "tk": "TK",
+    "wurst": "Wurst",
+    "mopro": "Mopro",
+    "sonstiges": "Sonstiges",
+}
 
 
 def write_excel(output_path: Path, matched_rows: list[dict[str, Any]], review_rows: list[dict[str, Any]], pair_rows: list[dict[str, Any]], attribute_rows: list[dict[str, Any]], logo_path: Path | None = None) -> None:
@@ -2128,7 +2148,7 @@ def write_excel(output_path: Path, matched_rows: list[dict[str, Any]], review_ro
         output_path,
         logo_path,
         title="LIST Goslar | Wettbewerbsvergleich Kurz",
-        subtitle="Kompakte Angebotsansicht: Menge, Preis, Gültigkeit und Staffelpreise",
+        subtitle="Kompakte Angebotsansicht: Preis, Gültigkeit, Menge und Staffelpreise",
         table_name="Final_Output_Short_tbl",
         compact_rows=True,
     )
@@ -2145,17 +2165,62 @@ def build_final_output_rows(matched_rows: list[dict[str, Any]], short: bool = Fa
     for row in matched_rows:
         suffix = "_short" if short else ""
         rows.append({
-            "Kategorie": row.get("category", ""),
-            "Produkt": row.get("product") or row.get("canonical_product_name", ""),
+            "Kategorie": category_label(row.get("category", "")),
+            "Produkt": product_name_from_offer_cells(row),
             "Marke": row.get("brand", ""),
-            "Beschreibung": row.get("description", ""),
+            "Beschreibung": wrap_excel_text(row.get("description", ""), 42),
             "Herkunft": row.get("origin", ""),
             "Metro": row.get(f"Metro{suffix}", ""),
             "Selgros": row.get(f"Selgros{suffix}", ""),
             "Handelshof": row.get(f"Handelshof{suffix}", ""),
             "Edeka": row.get(f"Edeka{suffix}", ""),
+            "EK": "",
+            "VK": "",
+            "Notizen": "",
         })
-    return sorted(rows, key=lambda r: (str(r.get("Kategorie", "")), str(r.get("Produkt", "")), str(r.get("Marke", ""))))
+    return sorted(rows, key=final_output_sort_key)
+
+
+def product_name_from_offer_cells(row: dict[str, Any]) -> str:
+    for supplier in SUPPLIER_ORDER:
+        offer_text = str(row.get(supplier, "") or "")
+        for line in offer_text.splitlines():
+            if line.startswith("Produkt:"):
+                product_name = line.removeprefix("Produkt:").strip()
+                if product_name:
+                    return product_name
+    return str(row.get("product") or row.get("canonical_product_name") or "").strip()
+
+
+def category_label(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    key = text.casefold().replace("-", "_").replace(" ", "_")
+    if key in CATEGORY_LABELS:
+        return CATEGORY_LABELS[key]
+    return " ".join(part[:1].upper() + part[1:].lower() for part in text.replace("_", " ").split())
+
+
+def category_order_index(value: Any) -> int:
+    text = str(value or "").casefold()
+    if text == "fisch":
+        return 0
+    if text == "fleisch":
+        return 1
+    if "obst" in text and ("gemüse" in text or "gemuese" in text):
+        return 2
+    return 10
+
+
+def final_output_sort_key(row: dict[str, Any]) -> tuple:
+    category = str(row.get("Kategorie", ""))
+    return (
+        category_order_index(category),
+        category.casefold(),
+        str(row.get("Produkt", "")).casefold(),
+        str(row.get("Marke", "")).casefold(),
+    )
 
 
 def write_final_output_sheet(
@@ -2174,9 +2239,10 @@ def write_final_output_sheet(
             ws.cell(row_idx, col_idx).fill = PatternFill("solid", fgColor=LIST_LIGHT)
 
     add_logo(ws, logo_path)
-    ws.merge_cells("D1:I1")
-    ws.merge_cells("D2:I2")
-    ws.merge_cells("D3:I3")
+    last_col = get_column_letter(len(FINAL_OUTPUT_COLUMNS))
+    ws.merge_cells(f"D1:{last_col}1")
+    ws.merge_cells(f"D2:{last_col}2")
+    ws.merge_cells(f"D3:{last_col}3")
     ws["D1"] = title
     ws["D1"].font = Font(bold=True, size=20, color=LIST_DARK)
     ws["D2"] = subtitle
@@ -2205,10 +2271,13 @@ def write_final_output_sheet(
         cell.alignment = Alignment(wrap_text=True, vertical="center")
         cell.border = Border(bottom=Side(style="thin", color=LIST_GREEN))
     for row_idx, row in enumerate(rows, header_row + 1):
+        previous_category = rows[row_idx - header_row - 2].get("Kategorie") if row_idx > header_row + 1 else None
+        current_category = row.get("Kategorie")
+        top_side = Side(style="medium", color=LIST_GREEN) if previous_category is not None and current_category != previous_category else Side(style="hair", color=LIST_LINE)
         for col_idx, column in enumerate(columns, 1):
             cell = ws.cell(row_idx, col_idx, row.get(column, ""))
             cell.fill = PatternFill("solid", fgColor="FFFFFF" if row_idx % 2 else "FAFCF7")
-            cell.border = Border(bottom=Side(style="hair", color=LIST_LINE))
+            cell.border = Border(top=top_side, bottom=Side(style="hair", color=LIST_LINE))
             cell.alignment = Alignment(wrap_text=True, vertical="top")
     ws.freeze_panes = f"A{header_row + 1}"
     if rows:
@@ -2226,21 +2295,33 @@ def write_final_output_sheet(
         "Selgros": 38,
         "Handelshof": 38,
         "Edeka": 38,
+        "EK": 14,
+        "VK": 14,
+        "Notizen": 34,
     }
     for idx, column in enumerate(columns, 1):
         ws.column_dimensions[get_column_letter(idx)].width = widths.get(column, 20)
     for row_idx in range(header_row + 1, ws.max_row + 1):
-        ws.row_dimensions[row_idx].height = compact_row_height(ws, row_idx, columns) if compact_rows else 92
+        ws.row_dimensions[row_idx].height = final_output_row_height(ws, row_idx, columns, widths, compact_rows)
 
 
-def compact_row_height(ws, row_idx: int, columns: list[str]) -> float:
+def final_output_row_height(ws, row_idx: int, columns: list[str], widths: dict[str, int], compact_rows: bool) -> float:
     max_lines = 1
-    for col_idx, _column in enumerate(columns, 1):
+    for col_idx, column in enumerate(columns, 1):
         value = str(ws.cell(row_idx, col_idx).value or "")
         if not value:
             continue
-        max_lines = max(max_lines, value.count("\n") + 1)
-    return min(54, max(18, 15 * max_lines))
+        max_lines = max(max_lines, estimated_excel_lines(value, widths.get(column, 20)))
+    max_height = 84 if compact_rows else 180
+    return min(max_height, max(22, 15 * max_lines + 6))
+
+
+def estimated_excel_lines(value: str, column_width: int) -> int:
+    line_count = 0
+    usable_width = max(8, column_width - 2)
+    for line in value.splitlines() or [""]:
+        line_count += max(1, math.ceil(len(line) / usable_width))
+    return line_count
 
 
 def add_logo(ws, logo_path: Path | None) -> None:
@@ -2291,7 +2372,8 @@ MATCHED_COLUMNS = [
 ]
 
 FINAL_OUTPUT_COLUMNS = [
-    "Kategorie", "Produkt", "Marke", "Beschreibung", "Herkunft", "Metro", "Selgros", "Handelshof", "Edeka",
+    "Kategorie", "Produkt", "Marke", "Beschreibung", "Herkunft",
+    "Metro", "Selgros", "Handelshof", "Edeka", "EK", "VK", "Notizen",
 ]
 
 REVIEW_COLUMNS = [
