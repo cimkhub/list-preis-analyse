@@ -59,9 +59,9 @@ INPUT_FILE = "all_suppliers_relevant.csv"
 OUTPUT_FILE = "matched_competitor_products.xlsx"
 EMBEDDING_DIR = "embeddings/product_matching"
 LOGO_FILE = "/Users/lukas/Downloads/Screenshot_2026-05-10_at_21.36.40-removebg-preview.png"
-ATTRIBUTE_MODEL = "deepseek-chat"
-PAIR_JUDGE_MODEL = "deepseek-chat"
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+ATTRIBUTE_MODEL = os.environ.get("DEEPSEEK_ATTRIBUTE_MODEL", os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"))
+PAIR_JUDGE_MODEL = os.environ.get("DEEPSEEK_PAIR_JUDGE_MODEL", os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"))
+DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 EMBEDDING_MODEL = "qwen/qwen3-embedding-8b"
 OPENROUTER_EMBEDDING_URL = "https://openrouter.ai/api/v1/embeddings"
 PINECONE_INDEX_NAME = "product-matching"
@@ -83,9 +83,9 @@ RELEVANT_VALUES = {"yes", "ja", "true", "1", "relevant", "x"}
 
 
 def main() -> None:
-    args = build_parser().parse_args()
     if load_dotenv:
         load_dotenv()
+    args = build_parser().parse_args()
 
     input_path = resolve_input_path(Path(args.input))
     output_path = Path(args.output)
@@ -98,7 +98,15 @@ def main() -> None:
     if df.empty:
         raise RuntimeError("No relevant rows found.")
 
-    pair_client = make_deepseek_client(args.skip_llm, "pair judgement")
+    pair_model = args.pair_judge_model or args.deepseek_model or PAIR_JUDGE_MODEL
+    pair_client = make_deepseek_client(
+        args.skip_llm,
+        "pair judgement",
+        model=pair_model,
+        base_url=args.deepseek_base_url,
+    )
+    if pair_client:
+        print(f"DeepSeek pair judge model: {pair_client['model']}")
     caches = Caches(embedding_dir)
 
     attributes = build_attributes(df, caches, None, args.force_refresh_attributes, True)
@@ -199,6 +207,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-products", type=int)
     parser.add_argument("--skip-llm", action="store_true")
     parser.add_argument("--pair-workers", type=int, default=PAIR_JUDGE_WORKERS)
+    parser.add_argument("--deepseek-model", default=os.environ.get("DEEPSEEK_MODEL", PAIR_JUDGE_MODEL))
+    parser.add_argument("--attribute-model", default=os.environ.get("DEEPSEEK_ATTRIBUTE_MODEL", ""))
+    parser.add_argument("--pair-judge-model", default=os.environ.get("DEEPSEEK_PAIR_JUDGE_MODEL", ""))
+    parser.add_argument("--deepseek-base-url", default=os.environ.get("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL))
     parser.add_argument("--pinecone-index", default=PINECONE_INDEX_NAME)
     parser.add_argument("--disable-pinecone", action="store_true")
     parser.add_argument("--upload-onedrive", action="store_true")
@@ -362,7 +374,12 @@ def append_jsonl(path: Path, item: dict[str, Any]) -> None:
         handle.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 
-def make_deepseek_client(skip_llm: bool, purpose: str) -> dict[str, str] | None:
+def make_deepseek_client(
+    skip_llm: bool,
+    purpose: str,
+    model: str | None = None,
+    base_url: str | None = None,
+) -> dict[str, str] | None:
     if skip_llm:
         return None
     api_key = get_env_any("DEEPSEEK_API_KEY", "deepseek_api_key", "Deepseek_api_key")
@@ -371,8 +388,8 @@ def make_deepseek_client(skip_llm: bool, purpose: str) -> dict[str, str] | None:
         return None
     return {
         "api_key": api_key,
-        "base_url": get_env_any("DEEPSEEK_BASE_URL", "deepseek_base_url") or DEEPSEEK_BASE_URL,
-        "model": ATTRIBUTE_MODEL if purpose == "attribute extraction" else PAIR_JUDGE_MODEL,
+        "base_url": base_url or get_env_any("DEEPSEEK_BASE_URL", "deepseek_base_url") or DEEPSEEK_BASE_URL,
+        "model": model or (ATTRIBUTE_MODEL if purpose == "attribute extraction" else PAIR_JUDGE_MODEL),
     }
 
 
@@ -1309,7 +1326,11 @@ def judge_pairs(
         hard_reasons: list[str] = []
         soft_warnings: list[str] = []
         cached = caches.pairs.get(pair_key)
-        if cached and not force and int(cached.get("schema_version") or 0) == PAIR_CACHE_VERSION:
+        cached_model_matches = (
+            not pair_client
+            or str(cached.get("model") or "") == pair_client["model"]
+        ) if cached else False
+        if cached and not force and int(cached.get("schema_version") or 0) == PAIR_CACHE_VERSION and cached_model_matches:
             decision = cached
             out[idx] = pair_debug_row(cand, hard_reasons, soft_warnings, decision)
         elif pair_client and not skip_llm:
@@ -1335,6 +1356,8 @@ def judge_pairs(
                     decision = future.result()
                 except Exception as exc:
                     decision = conservative_no_match(pair_key, cand, f"DeepSeek worker failed: {exc}")
+                if pair_client and not decision.get("model"):
+                    decision["model"] = pair_client["model"]
                 caches.append_pair(decision)
                 out[idx] = pair_debug_row(cand, hard_reasons, soft_warnings, decision)
 
@@ -1361,7 +1384,11 @@ def second_round_judge_pairs(
             continue
         pair_key = make_pair_key(row["product_id_a"], row["product_id_b"])
         cached = caches.second_pairs.get(pair_key)
-        if cached and not force and int(cached.get("schema_version") or 0) == SECOND_JUDGE_CACHE_VERSION:
+        cached_model_matches = (
+            not pair_client
+            or str(cached.get("model") or "") == pair_client["model"]
+        ) if cached else False
+        if cached and not force and int(cached.get("schema_version") or 0) == SECOND_JUDGE_CACHE_VERSION and cached_model_matches:
             pair_rows[idx] = apply_second_judgement(row, cached)
             continue
         jobs.append((idx, pair_key, row))
@@ -1387,6 +1414,8 @@ def second_round_judge_pairs(
                 judgement = future.result()
             except Exception as exc:
                 judgement = second_round_fallback(pair_key, f"Second judge failed: {exc}")
+            if pair_client and not judgement.get("model"):
+                judgement["model"] = pair_client["model"]
             caches.append_second_pair(judgement)
             pair_rows[idx] = apply_second_judgement(pair_row, judgement)
 
@@ -1881,7 +1910,7 @@ def build_output_rows(df: pd.DataFrame, attributes: dict[str, dict[str, Any]], p
         }
         for supplier in SUPPLIER_ORDER:
             matched[supplier] = "\n\n".join(format_offer_cell(p) for p in suppliers.get(supplier, []))
-            matched[f"{supplier}_short"] = "\n\n".join(format_offer_cell_short(p) for p in suppliers.get(supplier, []))
+            matched[f"{supplier}_short"] = "\n".join(format_offer_cell_short(p) for p in suppliers.get(supplier, []))
         matched_rows.append(matched)
         if review_needed:
             review_rows.append(make_review_row(cluster, canonical_name, products, review_reasons, cluster["pair_edges"]))
@@ -1991,15 +2020,17 @@ def format_offer_cell(product: dict[str, Any]) -> str:
 
 
 def format_offer_cell_short(product: dict[str, Any]) -> str:
-    parts = [
-        f"Preis: {format_german_number(product.get('price'))} €" if product.get("price") else "",
-        f"Gültig: {short_valid_label(product)}" if short_valid_label(product) else "",
-        f"Menge: {amount_label(product)}" if amount_label(product) != "unknown" else "",
-    ]
+    price = f"{format_german_number(product.get('price'))} €" if product.get("price") else ""
+    amount = amount_label(product)
+    valid = short_valid_label(product)
     tiers = price_tiers_label(product)
-    if tiers != "unknown":
-        parts.append(f"Staffel: {tiers.replace(' EUR', ' €')}")
-    return "\n".join(part for part in parts if part and part != "unknown")
+    parts = [
+        price,
+        amount if amount != "unknown" else "",
+        tiers.replace(" EUR", " €") if tiers != "unknown" else "",
+        valid,
+    ]
+    return " | ".join(part for part in parts if part and part != "unknown")
 
 
 def display_product_name(product: dict[str, Any]) -> str:
@@ -2009,7 +2040,22 @@ def display_product_name(product: dict[str, Any]) -> str:
 
 def amount_label(product: dict[str, Any]) -> str:
     quantity, unit = product.get("quantity"), product.get("unit")
-    return f"{quantity} {unit}".strip() if quantity or unit else "unknown"
+    quantity_text = clean_amount_value(quantity)
+    unit_text = clean_amount_value(unit)
+    return f"{quantity_text} {unit_text}".strip() if quantity_text or unit_text else "unknown"
+
+
+def clean_amount_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and math.isnan(value):
+        return ""
+    text = str(value).strip()
+    if not text or text.casefold() in {"none", "nan", "null"}:
+        return ""
+    if re.fullmatch(r"\d+(?:[.,]\d+)?", text):
+        return format_german_number(text)
+    return text
 
 
 def price_label(product: dict[str, Any]) -> str:

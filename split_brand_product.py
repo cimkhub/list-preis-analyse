@@ -314,7 +314,7 @@ def run_brand_product_split(
             continue
         key = cache_key(row)
         cached = cache.get(key)
-        if cached and not force_refresh:
+        if cached and not force_refresh and str(cached.get("model") or "") == deepseek_model:
             results[index] = {
                 "brand": cached.get("brand", ""),
                 "product": cached.get("product", "") or title_case_product(row.get("product_name", "")),
@@ -352,6 +352,7 @@ def run_brand_product_split(
                 _idx, split = future.result()
                 results[index] = split
                 item = {"cache_key": cache_key(row), **split}
+                item["model"] = deepseek_model
                 append_cache(item)
                 completed += 1
                 if completed == len(future_map) or completed % workers == 0:

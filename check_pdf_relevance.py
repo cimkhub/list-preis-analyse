@@ -60,6 +60,7 @@ def main() -> None:
         max_retries=config.vision_api.max_retries,
         temperature=config.vision_api.temperature,
         max_concurrent_requests=config.vision_api.max_concurrent_requests,
+        min_request_interval_seconds=config.vision_api.min_request_interval_seconds,
     )
 
     selected_suppliers = [

@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +32,23 @@ from src.report.parsed_csv import (
 from src.report.excel_report import generate_report
 
 
+DEEPSEEK_MODEL_ALIASES = {
+    "flash": ("DEEPSEEK_V4_FLASH_MODEL", "deepseek-chat"),
+    "v4-flash": ("DEEPSEEK_V4_FLASH_MODEL", "deepseek-chat"),
+    "pro": ("DEEPSEEK_V4_PRO_MODEL", "deepseek-reasoner"),
+    "v4-pro": ("DEEPSEEK_V4_PRO_MODEL", "deepseek-reasoner"),
+}
+
+
+def resolve_deepseek_model(value: str | None) -> tuple[str, str]:
+    requested = (value or "flash").strip()
+    key = requested.casefold()
+    if key in DEEPSEEK_MODEL_ALIASES:
+        env_name, default_model = DEEPSEEK_MODEL_ALIASES[key]
+        return requested, os.environ.get(env_name, default_model)
+    return "custom", requested
+
+
 def get_scraper(name: str, config: dict):
     if name == "metro":
         from src.acquire.metro import MetroScraper
@@ -47,14 +65,52 @@ def get_scraper(name: str, config: dict):
     else:
         raise ValueError(f"Unknown supplier: {name}")
 
+
+def load_products_from_parsed_csv(csv_path: Path) -> list[RawProduct]:
+    products: list[RawProduct] = []
+    with open(csv_path, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            row["price"] = float(row["price"]) if row["price"] else 0
+            row["extraction_confidence"] = float(row.get("extraction_confidence", 0.8))
+            row["price_is_net"] = row.get("price_is_net", "False") == "True"
+            row["price_tiers"] = (
+                json.loads(row["price_tiers"])
+                if row.get("price_tiers") and row["price_tiers"] != "None"
+                else None
+            )
+            for field in ["price_per_kg", "price_gross", "quantity"]:
+                row[field] = float(row[field]) if row.get(field) and row[field] != "None" else None
+            for field in ["calendar_week", "year", "source_page"]:
+                row[field] = int(row[field]) if row.get(field) and row[field] != "None" else None
+            for field in ["valid_from", "valid_to"]:
+                row[field] = row[field] if row.get(field) and row[field] != "None" else None
+            products.append(RawProduct(**row))
+    return products
+
+
 def run_pipeline(week: int | None = None, year: int | None = None,
                  suppliers: list[str] | None = None,
                  skip_scrape: bool = False,
                  use_cache: bool = False,
-                 scrape_only: bool = False):
+                 scrape_only: bool = False,
+                 skip_market_forecast: bool = False,
+                 skip_onedrive_upload: bool = False,
+                 onedrive_url: str | None = None,
+                 onedrive_login_pause: bool = False,
+                 deepseek_model: str = "flash"):
     config = load_config()
     logger = setup_logging(config.storage.logs_dir)
     logger.info("=" * 60)
+    deepseek_profile, deepseek_model_id = resolve_deepseek_model(deepseek_model)
+    deepseek_env = os.environ.copy()
+    deepseek_env["DEEPSEEK_MODEL"] = deepseek_model_id
+    deepseek_env["DEEPSEEK_SIGNAL_MODEL"] = deepseek_model_id
+    logger.info(
+        "DeepSeek model selection: %s -> %s",
+        deepseek_profile,
+        deepseek_model_id,
+    )
 
     if week is None or year is None:
         week, year = next_week()
@@ -74,6 +130,7 @@ def run_pipeline(week: int | None = None, year: int | None = None,
             max_retries=config.vision_api.max_retries,
             temperature=config.vision_api.temperature,
             max_concurrent_requests=config.vision_api.max_concurrent_requests,
+            min_request_interval_seconds=config.vision_api.min_request_interval_seconds,
         )
     elif not scrape_only:
         logger.warning("No GEMINI_API_KEY set - Vision API extraction will fail")
@@ -82,6 +139,7 @@ def run_pipeline(week: int | None = None, year: int | None = None,
     total_documents_found = 0
     final_status = "failed"
     final_extra = None
+    onedrive_upload_status = "not run"
 
     log_event(
         logger,
@@ -95,6 +153,7 @@ def run_pipeline(week: int | None = None, year: int | None = None,
         skip_scrape=skip_scrape,
         use_cache=use_cache,
         scrape_only=scrape_only,
+        deepseek_model=deepseek_model_id,
     )
 
     should_send_completion_sms = (
@@ -110,6 +169,33 @@ def run_pipeline(week: int | None = None, year: int | None = None,
             logger.info("--- ACQUISITION ---")
             for supplier_name in selected_suppliers:
                 supplier_config = config.suppliers[supplier_name]
+                if use_cache and not scrape_only:
+                    cached_csv_path = find_existing_supplier_parsed_csv_path(
+                        supplier_name,
+                        week,
+                        year,
+                        config.storage.parsed_dir,
+                    )
+                    if cached_csv_path.exists():
+                        cached_products = load_products_from_parsed_csv(cached_csv_path)
+                        all_products.extend(cached_products)
+                        logger.info(
+                            "%s: Loaded %d products from existing parsed CSV %s; skipping PDF extraction",
+                            supplier_name,
+                            len(cached_products),
+                            cached_csv_path,
+                        )
+                        log_event(
+                            logger,
+                            f"{supplier_name} parsed CSV cache loaded",
+                            event="supplier_cache",
+                            status="ok",
+                            supplier=supplier_name,
+                            product_count=len(cached_products),
+                            input_path=str(cached_csv_path),
+                        )
+                        continue
+
                 logger.info(f"--- Acquiring {supplier_name.upper()} ---")
                 try:
                     scraper = get_scraper(supplier_name, supplier_config.model_dump())
@@ -263,25 +349,7 @@ def run_pipeline(week: int | None = None, year: int | None = None,
                         config.storage.parsed_dir,
                     )
                     if csv_path.exists():
-                        with open(csv_path, encoding="utf-8") as f:
-                            reader = csv.DictReader(f)
-                            for row in reader:
-                                # Convert types
-                                row["price"] = float(row["price"]) if row["price"] else 0
-                                row["extraction_confidence"] = float(row.get("extraction_confidence", 0.8))
-                                row["price_is_net"] = row.get("price_is_net", "False") == "True"
-                                row["price_tiers"] = (
-                                    json.loads(row["price_tiers"])
-                                    if row.get("price_tiers") and row["price_tiers"] != "None"
-                                    else None
-                                )
-                                for field in ["price_per_kg", "price_gross", "quantity"]:
-                                    row[field] = float(row[field]) if row.get(field) and row[field] != "None" else None
-                                for field in ["calendar_week", "year", "source_page"]:
-                                    row[field] = int(row[field]) if row.get(field) and row[field] != "None" else None
-                                for field in ["valid_from", "valid_to"]:
-                                    row[field] = row[field] if row.get(field) and row[field] != "None" else None
-                                all_products.append(RawProduct(**row))
+                        all_products.extend(load_products_from_parsed_csv(csv_path))
                         logger.info(f"Loaded {supplier_name} from existing CSV")
                 except Exception as e:
                     logger.error(f"{supplier_name}: Failed loading cache - {e}", exc_info=True)
@@ -344,10 +412,12 @@ def run_pipeline(week: int | None = None, year: int | None = None,
             relevant_csv_path, relevant_yes_count, relevant_no_count = run_relevance_classification(
                 input_path=combined_csv_path,
                 output_path=combined_csv_path.with_name("all_suppliers_relevant.csv"),
+                deepseek_model=deepseek_model_id,
             )
             relevant_csv_path, split_count = run_brand_product_split(
                 input_path=relevant_csv_path,
                 workers=25,
+                deepseek_model=deepseek_model_id,
             )
             relevant_xlsx_path = write_xlsx(relevant_csv_path)
         logger.info(
@@ -381,10 +451,110 @@ def run_pipeline(week: int | None = None, year: int | None = None,
                     "embeddings/product_matching",
                     "--pair-workers",
                     "25",
+                    "--deepseek-model",
+                    deepseek_model_id,
                 ],
                 check=True,
+                env=deepseek_env,
             )
         logger.info("Saved competitor matching output to %s", matched_competitor_path)
+
+        # Stage 4c: Search-based market forecast signals.
+        # This runs once per generated market group (e.g. "Rindfleisch"), not once per
+        # individual product row, combines Brave and Tavily evidence, and then writes
+        # the same signal back to all matching rows.
+        if not skip_market_forecast:
+            logger.info("--- MARKET FORECAST SIGNALS ---")
+            forecast_cache_dir = matched_competitor_path.parent / "market_forecast_cache"
+            try:
+                with log_stage(
+                    logger,
+                    "Market forecast signal enrichment",
+                    event="market_forecast",
+                    workbook=str(matched_competitor_path),
+                    cache_dir=str(forecast_cache_dir),
+                ):
+                    subprocess.run(
+                        [
+                            sys.executable,
+                            str(Path(__file__).parent / "add_market_forecast_signals.py"),
+                            "--workbook",
+                            str(matched_competitor_path),
+                            "--cache-dir",
+                            str(forecast_cache_dir),
+                            "--deepseek-model",
+                            deepseek_model_id,
+                            "--deepseek-signal-model",
+                            deepseek_model_id,
+                        ],
+                        check=True,
+                        env=deepseek_env,
+                    )
+                logger.info("Added market forecast signals to %s", matched_competitor_path)
+            except Exception as exc:
+                logger.warning("Market forecast signal enrichment skipped/failed: %s", exc, exc_info=True)
+        else:
+            logger.info("Market forecast signal enrichment skipped by CLI flag")
+
+        try:
+            from openpyxl import load_workbook
+            from add_market_forecast_signals import finalize_customer_workbook
+
+            workbook = load_workbook(matched_competitor_path)
+            final_sheet = finalize_customer_workbook(workbook, matched_competitor_path)
+            workbook.save(matched_competitor_path)
+            logger.info("Final customer workbook reduced to one sheet: %s", final_sheet)
+        except Exception as exc:
+            logger.warning("Final customer workbook cleanup failed: %s", exc, exc_info=True)
+
+        # Stage 4d: Upload the final customer workbook to the shared LIST OneDrive folder.
+        # This uses the browser UI because the client folder is accessible in the browser,
+        # but not reliably through Microsoft Graph shared-link APIs.
+        if not skip_onedrive_upload:
+            logger.info("--- ONEDRIVE UPLOAD ---")
+            upload_command = [
+                sys.executable,
+                str(Path(__file__).parent / "upload_to_onedrive_browser.py"),
+                "--file",
+                str(matched_competitor_path),
+                "--filename",
+                matched_competitor_path.name,
+                "--timeout",
+                "240",
+            ]
+            if onedrive_url:
+                upload_command.extend(["--target-url", onedrive_url])
+            if not onedrive_login_pause:
+                upload_command.append("--no-login-pause")
+
+            try:
+                with log_stage(
+                    logger,
+                    "OneDrive browser upload",
+                    event="onedrive_upload",
+                    workbook=str(matched_competitor_path),
+                    filename=matched_competitor_path.name,
+                ):
+                    subprocess.run(upload_command, check=True)
+                onedrive_upload_status = "uploaded"
+                logger.info("Uploaded final customer workbook to OneDrive: %s", matched_competitor_path.name)
+            except Exception as exc:
+                onedrive_upload_status = f"upload failed: {exc}"
+                logger.warning("OneDrive upload failed: %s", exc, exc_info=True)
+                log_event(
+                    logger,
+                    "OneDrive upload failed",
+                    event="onedrive_upload",
+                    status="error",
+                    workbook=str(matched_competitor_path),
+                    filename=matched_competitor_path.name,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                    exc_info=True,
+                )
+        else:
+            onedrive_upload_status = "skipped"
+            logger.info("OneDrive upload skipped by CLI flag")
 
         # Stage 5: Harmonize
         logger.info("--- HARMONIZATION ---")
@@ -426,7 +596,8 @@ def run_pipeline(week: int | None = None, year: int | None = None,
         final_status = "completed"
         final_extra = (
             f"Done. Documents found: {total_documents_found}. "
-            f"Products: {len(all_products)}. Report: {Path(report_path).name}."
+            f"Products: {len(all_products)}. Report: {Path(report_path).name}. "
+            f"OneDrive: {onedrive_upload_status}."
         )
         log_event(
             logger,
@@ -441,6 +612,8 @@ def run_pipeline(week: int | None = None, year: int | None = None,
             matched_count=len(matched),
             unmatched_count=len(unmatched),
             report_path=str(report_path),
+            customer_workbook_path=str(matched_competitor_path),
+            onedrive_upload_status=onedrive_upload_status,
         )
     finally:
         if final_status != "completed":
@@ -484,6 +657,20 @@ def main():
                         help="Use cached data if available (default: always scrape fresh)")
     parser.add_argument("--scrape-only", action="store_true",
                         help="Run only supplier scraping/downloads without relevance filtering or PDF extraction")
+    parser.add_argument("--skip-market-forecast", action="store_true",
+                        help="Skip search-based market forecast enrichment of the final Artikelvergleich workbook")
+    parser.add_argument("--skip-onedrive-upload", action="store_true",
+                        help="Skip browser-based upload of the final Artikelvergleich workbook to OneDrive")
+    parser.add_argument("--onedrive-url",
+                        help="Override the shared OneDrive folder URL used by the browser uploader")
+    parser.add_argument("--onedrive-login-pause", action="store_true",
+                        help="Pause browser upload so you can manually complete Microsoft login/email-code verification")
+    parser.add_argument("--deepseek-model", default="flash",
+                        help=(
+                            "DeepSeek model profile or exact model id. Use 'flash' or 'pro'. "
+                            "flash maps to DEEPSEEK_V4_FLASH_MODEL or deepseek-chat; "
+                            "pro maps to DEEPSEEK_V4_PRO_MODEL or deepseek-reasoner."
+                        ))
     parser.add_argument("--config", type=str, default="config.yaml",
                         help="Config file path")
     args = parser.parse_args()
@@ -495,6 +682,11 @@ def main():
         skip_scrape=args.skip_scrape,
         use_cache=args.cache,
         scrape_only=args.scrape_only,
+        skip_market_forecast=args.skip_market_forecast,
+        skip_onedrive_upload=args.skip_onedrive_upload,
+        onedrive_url=args.onedrive_url,
+        onedrive_login_pause=args.onedrive_login_pause,
+        deepseek_model=args.deepseek_model,
     )
 
 

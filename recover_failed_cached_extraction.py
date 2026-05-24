@@ -208,6 +208,7 @@ def main() -> None:
         max_retries=config.vision_api.max_retries,
         temperature=config.vision_api.temperature,
         max_concurrent_requests=args.workers,
+        min_request_interval_seconds=config.vision_api.min_request_interval_seconds,
     )
 
     document_index = build_document_index(config, selected_suppliers, args.week, args.year)

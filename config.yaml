@@ -45,9 +45,10 @@ suppliers:
 vision_api:
   provider: "gemini"
   model: "gemini-2.5-flash"
-  max_retries: 3
+  max_retries: 8
   temperature: 0.1
-  max_concurrent_requests: 10
+  max_concurrent_requests: 1
+  min_request_interval_seconds: 7.0
 
 pipeline:
   image_dpi: 300

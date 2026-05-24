@@ -1,6 +1,7 @@
 # Local secrets and auth tokens
 .env
 .onedrive_token.json
+.playwright_onedrive_profile/
 
 # Python/runtime caches
 __pycache__/
@@ -24,6 +25,7 @@ parsed/
 reports/
 logs/
 embeddings/
+market_forecast_cache/
 debug/
 example/
 Referenz Data/

@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
 import random
+import threading
 import time
 from pathlib import Path
 
@@ -20,7 +21,10 @@ _settings = {
     "max_retries": 3,
     "temperature": 0.1,
     "max_concurrent_requests": 10,
+    "min_request_interval_seconds": 0.0,
 }
+_rate_limit_lock = threading.Lock()
+_last_request_started_at = 0.0
 
 
 def configure_gemini(
@@ -29,6 +33,7 @@ def configure_gemini(
     max_retries: int | None = None,
     temperature: float | None = None,
     max_concurrent_requests: int | None = None,
+    min_request_interval_seconds: float | None = None,
 ):
     global _client
     _client = genai.Client(api_key=api_key)
@@ -40,6 +45,8 @@ def configure_gemini(
         _settings["temperature"] = temperature
     if max_concurrent_requests is not None:
         _settings["max_concurrent_requests"] = max_concurrent_requests
+    if min_request_interval_seconds is not None:
+        _settings["min_request_interval_seconds"] = max(0.0, float(min_request_interval_seconds))
 
 
 def _resolve_setting(name: str, value):
@@ -63,6 +70,7 @@ def analyze_image_json(
     model_name = _resolve_setting("model_name", model_name)
     max_retries = _resolve_setting("max_retries", max_retries)
     temperature = _resolve_setting("temperature", temperature)
+    min_request_interval_seconds = _resolve_setting("min_request_interval_seconds", None)
     call_started = time.perf_counter()
 
     img_bytes = Path(image_path).read_bytes()
@@ -83,6 +91,7 @@ def analyze_image_json(
     for attempt in range(max_retries):
         attempt_started = time.perf_counter()
         try:
+            _wait_for_gemini_rate_limit(min_request_interval_seconds)
             response = _client.models.generate_content(
                 model=model_name,
                 contents=[
@@ -181,9 +190,31 @@ def analyze_image_json(
 
 def _retry_delay_seconds(attempt: int, error: Exception) -> float:
     message = str(error).lower()
+    if (
+        "429" in message
+        or "quota" in message
+        or "rate" in message
+        or "resource_exhausted" in message
+        or "too many requests" in message
+    ):
+        return min(60 * (2 ** attempt), 300) + random.uniform(0, 10)
     if "503" in message or "unavailable" in message or "high demand" in message:
         return min(15 * (2 ** attempt), 90) + random.uniform(0, 3)
     return 2 ** attempt
+
+
+def _wait_for_gemini_rate_limit(min_interval_seconds: float | None) -> None:
+    global _last_request_started_at
+    min_interval_seconds = float(min_interval_seconds or 0.0)
+    if min_interval_seconds <= 0:
+        return
+    with _rate_limit_lock:
+        now = time.monotonic()
+        wait_seconds = (_last_request_started_at + min_interval_seconds) - now
+        if wait_seconds > 0:
+            logger.info("Gemini low-tier throttle: waiting %.1fs before next request", wait_seconds)
+            time.sleep(wait_seconds)
+        _last_request_started_at = time.monotonic()
 
 
 def extract_products_from_image(

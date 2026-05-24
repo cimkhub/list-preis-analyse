@@ -25,6 +25,7 @@ class VisionApiConfig(BaseModel):
     max_retries: int = 3
     temperature: float = 0.1
     max_concurrent_requests: int = 10
+    min_request_interval_seconds: float = 0.0
     api_key: str = ""
 
 
@@ -71,7 +72,19 @@ def load_config(config_path: str = "config.yaml") -> AppConfig:
         raw = yaml.safe_load(f)
 
     config = AppConfig(**raw)
-    config.vision_api.api_key = os.environ.get("GEMINI_API_KEY", "")
+    config.vision_api.api_key = (
+        os.environ.get("GEMINI_API_KEY_PRIVATE")
+        or os.environ.get("GEMINI_API_KEY_NEW")
+        or os.environ.get("GEMINI_API_KEY-new")
+        or os.environ.get("GEMINI_API_KEY", "")
+    )
+    config.vision_api.model = os.environ.get("GEMINI_MODEL", config.vision_api.model)
+    if os.environ.get("GEMINI_MAX_RETRIES"):
+        config.vision_api.max_retries = int(os.environ["GEMINI_MAX_RETRIES"])
+    if os.environ.get("GEMINI_MAX_CONCURRENT_REQUESTS"):
+        config.vision_api.max_concurrent_requests = int(os.environ["GEMINI_MAX_CONCURRENT_REQUESTS"])
+    if os.environ.get("GEMINI_MIN_REQUEST_INTERVAL_SECONDS"):
+        config.vision_api.min_request_interval_seconds = float(os.environ["GEMINI_MIN_REQUEST_INTERVAL_SECONDS"])
     config.twilio.account_sid = (
         os.environ.get("TWILIO_ACCOUNT_SID")
         or os.environ.get("Account_SID", "")

@@ -151,6 +151,7 @@ def run_worker(args) -> None:
         max_retries=config.vision_api.max_retries,
         temperature=config.vision_api.temperature,
         max_concurrent_requests=1,
+        min_request_interval_seconds=config.vision_api.min_request_interval_seconds,
     )
 
     raw_items = extract_products_from_image(str(args.page_image), supplier=args.supplier)
