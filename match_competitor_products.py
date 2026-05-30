@@ -2168,6 +2168,7 @@ LIST_YELLOW = "F7BC60"
 LIST_DARK = "27321F"
 LIST_LIGHT = "F6FAF0"
 LIST_LINE = "D9E6D0"
+FINAL_OUTPUT_VERTICAL_SEPARATOR_COLUMNS = {"Herkunft", "Edeka", "VK"}
 CATEGORY_LABELS = {
     "fisch": "Fisch",
     "fleisch": "Fleisch",
@@ -2188,12 +2189,13 @@ def write_excel(output_path: Path, matched_rows: list[dict[str, Any]], review_ro
     ws = wb.active
     ws.title = "Final Output"
     write_final_output_sheet(ws, build_final_output_rows(matched_rows), output_path, logo_path)
+    week_label = output_week_label(output_path)
     write_final_output_sheet(
         wb.create_sheet("Final Output Short"),
         build_final_output_rows(matched_rows, short=True),
         output_path,
         logo_path,
-        title="LIST Goslar | Wettbewerbsvergleich Kurz",
+        title=f"Wilhelm LIST Nachfolger | Wettbewerbsvergleich {week_label}",
         subtitle="Kompakte Angebotsansicht: Preis, Gültigkeit, Menge und Staffelpreise",
         table_name="Final_Output_Short_tbl",
         compact_rows=True,
@@ -2204,6 +2206,16 @@ def write_excel(output_path: Path, matched_rows: list[dict[str, Any]], review_ro
     attr_columns = list(attribute_rows[0].keys()) if attribute_rows else []
     write_sheet(wb.create_sheet("attribute_debug"), attribute_rows, attr_columns)
     wb.save(output_path)
+
+
+def output_week_label(output_path: Path) -> str:
+    for value in [output_path.stem, output_path.parent.name]:
+        match = re.search(r"\bKW\s*(\d{1,2})\b", value, flags=re.IGNORECASE)
+        if not match:
+            match = re.search(r"KW(\d{1,2})", value, flags=re.IGNORECASE)
+        if match:
+            return f"KW{int(match.group(1)):02d}"
+    return "KW"
 
 
 def build_final_output_rows(matched_rows: list[dict[str, Any]], short: bool = False) -> list[dict[str, Any]]:
@@ -2269,6 +2281,18 @@ def final_output_sort_key(row: dict[str, Any]) -> tuple:
     )
 
 
+def final_output_cell_border(
+    column: str,
+    top: Side | None = None,
+    bottom: Side | None = None,
+) -> Border:
+    return Border(
+        top=top or Side(),
+        bottom=bottom or Side(),
+        right=Side(style="medium", color=LIST_GREEN) if column in FINAL_OUTPUT_VERTICAL_SEPARATOR_COLUMNS else Side(),
+    )
+
+
 def write_final_output_sheet(
     ws,
     rows: list[dict[str, Any]],
@@ -2315,7 +2339,10 @@ def write_final_output_sheet(
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor=LIST_DARK)
         cell.alignment = Alignment(wrap_text=True, vertical="center")
-        cell.border = Border(bottom=Side(style="thin", color=LIST_GREEN))
+        cell.border = final_output_cell_border(
+            column,
+            bottom=Side(style="thin", color=LIST_GREEN),
+        )
     for row_idx, row in enumerate(rows, header_row + 1):
         previous_category = rows[row_idx - header_row - 2].get("Kategorie") if row_idx > header_row + 1 else None
         current_category = row.get("Kategorie")
@@ -2323,7 +2350,11 @@ def write_final_output_sheet(
         for col_idx, column in enumerate(columns, 1):
             cell = ws.cell(row_idx, col_idx, row.get(column, ""))
             cell.fill = PatternFill("solid", fgColor="FFFFFF" if row_idx % 2 else "FAFCF7")
-            cell.border = Border(top=top_side, bottom=Side(style="hair", color=LIST_LINE))
+            cell.border = final_output_cell_border(
+                column,
+                top=top_side,
+                bottom=Side(style="hair", color=LIST_LINE),
+            )
             cell.alignment = Alignment(wrap_text=True, vertical="top")
     ws.freeze_panes = f"A{header_row + 1}"
     if rows:

@@ -6,6 +6,7 @@ import csv
 import json
 import logging
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -47,6 +48,30 @@ def resolve_deepseek_model(value: str | None) -> tuple[str, str]:
         env_name, default_model = DEEPSEEK_MODEL_ALIASES[key]
         return requested, os.environ.get(env_name, default_model)
     return "custom", requested
+
+
+def run_logged_subprocess(
+    command: list[str],
+    *,
+    logger: logging.Logger,
+    label: str,
+    env: dict[str, str] | None = None,
+) -> None:
+    logger.info("%s command: %s", label, shlex.join(command))
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=env,
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        logger.info("%s | %s", label, line.rstrip())
+    return_code = process.wait()
+    if return_code:
+        raise subprocess.CalledProcessError(return_code, command)
 
 
 def get_scraper(name: str, config: dict):
@@ -100,7 +125,11 @@ def run_pipeline(week: int | None = None, year: int | None = None,
                  onedrive_login_pause: bool = False,
                  deepseek_model: str = "flash"):
     config = load_config()
-    logger = setup_logging(config.storage.logs_dir)
+
+    if week is None or year is None:
+        week, year = next_week()
+
+    logger = setup_logging(config.storage.logs_dir, week=week, year=year)
     logger.info("=" * 60)
     deepseek_profile, deepseek_model_id = resolve_deepseek_model(deepseek_model)
     deepseek_env = os.environ.copy()
@@ -112,8 +141,6 @@ def run_pipeline(week: int | None = None, year: int | None = None,
         deepseek_model_id,
     )
 
-    if week is None or year is None:
-        week, year = next_week()
     logger.info(f"Running pipeline for {format_week(week, year)}")
     selected_suppliers = [
         supplier_name
@@ -283,19 +310,46 @@ def run_pipeline(week: int | None = None, year: int | None = None,
                             )
 
                         supplier_products = []
+                        failed_documents = []
                         for doc in documents:
                             doc_name = Path(doc.file_path).name if doc.file_path else (doc.title or "unknown")
-                            with log_stage(
-                                logger,
-                                f"{supplier_name} document extraction",
-                                event="document_extract",
-                                supplier=supplier_name,
-                                document=doc_name,
-                                source_file=doc.file_path,
-                                title=doc.title,
-                                tab=doc.tab,
-                            ):
-                                products = scraper.extract_products(doc)
+                            try:
+                                with log_stage(
+                                    logger,
+                                    f"{supplier_name} document extraction",
+                                    event="document_extract",
+                                    supplier=supplier_name,
+                                    document=doc_name,
+                                    source_file=doc.file_path,
+                                    title=doc.title,
+                                    tab=doc.tab,
+                                ):
+                                    products = scraper.extract_products(doc)
+                            except Exception as e:
+                                failed_documents.append(doc_name)
+                                logger.error(
+                                    "%s: Skipping failed document %s - %s",
+                                    supplier_name,
+                                    doc_name,
+                                    e,
+                                    exc_info=True,
+                                )
+                                log_event(
+                                    logger,
+                                    f"{supplier_name} document skipped after extraction failure",
+                                    event="document_extract",
+                                    status="skipped",
+                                    supplier=supplier_name,
+                                    document=doc_name,
+                                    source_file=doc.file_path,
+                                    title=doc.title,
+                                    tab=doc.tab,
+                                    error_type=type(e).__name__,
+                                    error_message=str(e),
+                                    exc_info=True,
+                                )
+                                continue
+
                             supplier_products.extend(products)
                             log_event(
                                 logger,
@@ -305,6 +359,23 @@ def run_pipeline(week: int | None = None, year: int | None = None,
                                 supplier=supplier_name,
                                 document=doc_name,
                                 product_count=len(products),
+                            )
+
+                        if failed_documents:
+                            logger.warning(
+                                "%s: Skipped %d failed documents and continued: %s",
+                                supplier_name,
+                                len(failed_documents),
+                                ", ".join(failed_documents),
+                            )
+                            log_event(
+                                logger,
+                                f"{supplier_name} document extraction completed with skipped documents",
+                                event="supplier_pipeline",
+                                status="partial",
+                                supplier=supplier_name,
+                                skipped_document_count=len(failed_documents),
+                                skipped_documents=failed_documents,
                             )
 
                         if supplier_products:
@@ -439,7 +510,7 @@ def run_pipeline(week: int | None = None, year: int | None = None,
             input_path=str(relevant_csv_path),
             output_path=str(matched_competitor_path),
         ):
-            subprocess.run(
+            run_logged_subprocess(
                 [
                     sys.executable,
                     str(Path(__file__).parent / "match_competitor_products.py"),
@@ -454,7 +525,8 @@ def run_pipeline(week: int | None = None, year: int | None = None,
                     "--deepseek-model",
                     deepseek_model_id,
                 ],
-                check=True,
+                logger=logger,
+                label="competitor_matching",
                 env=deepseek_env,
             )
         logger.info("Saved competitor matching output to %s", matched_competitor_path)
@@ -474,7 +546,7 @@ def run_pipeline(week: int | None = None, year: int | None = None,
                     workbook=str(matched_competitor_path),
                     cache_dir=str(forecast_cache_dir),
                 ):
-                    subprocess.run(
+                    run_logged_subprocess(
                         [
                             sys.executable,
                             str(Path(__file__).parent / "add_market_forecast_signals.py"),
@@ -487,7 +559,8 @@ def run_pipeline(week: int | None = None, year: int | None = None,
                             "--deepseek-signal-model",
                             deepseek_model_id,
                         ],
-                        check=True,
+                        logger=logger,
+                        label="market_forecast",
                         env=deepseek_env,
                     )
                 logger.info("Added market forecast signals to %s", matched_competitor_path)
@@ -535,7 +608,11 @@ def run_pipeline(week: int | None = None, year: int | None = None,
                     workbook=str(matched_competitor_path),
                     filename=matched_competitor_path.name,
                 ):
-                    subprocess.run(upload_command, check=True)
+                    run_logged_subprocess(
+                        upload_command,
+                        logger=logger,
+                        label="onedrive_upload",
+                    )
                 onedrive_upload_status = "uploaded"
                 logger.info("Uploaded final customer workbook to OneDrive: %s", matched_competitor_path.name)
             except Exception as exc:

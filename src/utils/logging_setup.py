@@ -41,10 +41,23 @@ class JsonLogFormatter(logging.Formatter):
         return json.dumps(data, ensure_ascii=False)
 
 
-def setup_logging(logs_dir: str = "logs", level: int = logging.INFO) -> logging.Logger:
+def setup_logging(
+    logs_dir: str = "logs",
+    level: int = logging.INFO,
+    week: int | None = None,
+    year: int | None = None,
+) -> logging.Logger:
     logs_path = Path(logs_dir)
     runs_path = logs_path / "runs"
     runs_path.mkdir(parents=True, exist_ok=True)
+    if week and year:
+        week_runs_path = logs_path / f"KW{week:02d}_{year}"
+        weekly_file = logs_path / f"{year}_KW{week:02d}.log"
+    else:
+        iso_year, iso_week, _ = datetime.now().isocalendar()
+        week_runs_path = logs_path / f"KW{iso_week:02d}_{iso_year}"
+        weekly_file = logs_path / f"{iso_year}_KW{iso_week:02d}.log"
+    week_runs_path.mkdir(parents=True, exist_ok=True)
 
     run_id = f"{datetime.now().strftime('%Y%m%dT%H%M%S')}_{uuid4().hex[:8]}"
     _RUN_ID.set(run_id)
@@ -68,7 +81,6 @@ def setup_logging(logs_dir: str = "logs", level: int = logging.INFO) -> logging.
     ))
     logger.addHandler(console)
 
-    weekly_file = logs_path / f"{datetime.now().isocalendar().year}_KW{datetime.now().isocalendar().week:02d}.log"
     weekly_handler = logging.FileHandler(weekly_file, encoding="utf-8")
     weekly_handler.setLevel(logging.DEBUG)
     weekly_handler.addFilter(run_filter)
@@ -86,6 +98,15 @@ def setup_logging(logs_dir: str = "logs", level: int = logging.INFO) -> logging.
     ))
     logger.addHandler(run_handler)
 
+    week_run_log_path = week_runs_path / f"{run_id}.log"
+    week_run_handler = logging.FileHandler(week_run_log_path, encoding="utf-8")
+    week_run_handler.setLevel(logging.DEBUG)
+    week_run_handler.addFilter(run_filter)
+    week_run_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)-7s] %(run_id)s %(name)s - %(message)s"
+    ))
+    logger.addHandler(week_run_handler)
+
     json_path = runs_path / f"{run_id}.jsonl"
     json_handler = logging.FileHandler(json_path, encoding="utf-8")
     json_handler.setLevel(logging.DEBUG)
@@ -93,13 +114,22 @@ def setup_logging(logs_dir: str = "logs", level: int = logging.INFO) -> logging.
     json_handler.setFormatter(JsonLogFormatter())
     logger.addHandler(json_handler)
 
+    week_json_path = week_runs_path / f"{run_id}.jsonl"
+    week_json_handler = logging.FileHandler(week_json_path, encoding="utf-8")
+    week_json_handler.setLevel(logging.DEBUG)
+    week_json_handler.addFilter(run_filter)
+    week_json_handler.setFormatter(JsonLogFormatter())
+    logger.addHandler(week_json_handler)
+
     log_event(
         logger,
         "Logger initialized",
         event="logging_setup",
         status="ready",
         run_log_path=str(run_log_path),
+        week_run_log_path=str(week_run_log_path),
         json_log_path=str(json_path),
+        week_json_log_path=str(week_json_path),
         weekly_log_path=str(weekly_file),
     )
 

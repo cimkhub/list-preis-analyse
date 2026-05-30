@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LIST Preisvergleich</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand-lockup">
+          <img class="client-logo" src="/client-logo" alt="LIST" />
+          <div class="brand-subtitle">Preisvergleich</div>
+        </div>
+
+        <nav class="nav">
+          <button class="nav-item active" data-view="run">Pipeline starten</button>
+          <button class="nav-item" data-view="history">Historische Läufe</button>
+        </nav>
+
+        <div class="sidebar-foot">
+          <span class="status-dot"></span>
+          <span id="serverStatus">Lokale Anwendung bereit</span>
+        </div>
+      </aside>
+
+      <main class="content">
+        <header class="topbar">
+          <div>
+            <h1 id="pageTitle">Pipeline starten</h1>
+            <p id="pageSubtitle">Starte einen Wochenlauf und verfolge jeden wichtigen Schritt verständlich.</p>
+          </div>
+          <button id="refreshBtn" class="secondary-btn">Aktualisieren</button>
+        </header>
+
+        <section id="view-run" class="view active">
+          <div class="run-grid">
+            <section class="panel run-control">
+              <div class="panel-header">
+                <div>
+                  <h2>Wochenpipeline starten</h2>
+                  <p>Kalenderwoche manuell auswählen und die komplette Pipeline ausführen.</p>
+                </div>
+              </div>
+              <div class="form-grid">
+                <label>
+                  Kalenderwoche
+                  <input id="runWeek" type="number" min="1" max="53" />
+                </label>
+                <label>
+                  Jahr
+                  <input id="runYear" type="number" min="2024" max="2035" />
+                </label>
+              </div>
+              <button id="startRunBtn" class="primary-btn">Pipeline-Lauf starten</button>
+              <div class="hint">Erstellt Extraktionsdateien, Relevanzprüfungen, Zuordnungs-Prüfdaten sowie die normale und kurze Excel-Ausgabe.</div>
+            </section>
+
+            <section class="panel progress-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>Aktueller Fortschritt</h2>
+                  <p id="runMessage">Noch kein aktiver Lauf.</p>
+                </div>
+                <span id="runBadge" class="badge neutral">bereit</span>
+              </div>
+              <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+              <div id="stepList" class="step-list"></div>
+            </section>
+          </div>
+
+          <section class="panel log-panel">
+            <div class="panel-header">
+              <div>
+                <h2>Detailaktivität</h2>
+                <p>Verständlicher Ablauf aus dem aktuellen Pipeline-Lauf.</p>
+              </div>
+            </div>
+            <div id="runLogs" class="log-stream empty-state">Starte einen Lauf, um hier Echtzeit-Details zu sehen.</div>
+          </section>
+        </section>
+
+        <section id="view-history" class="view">
+          <div class="history-workspace">
+            <section class="panel history-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>Historische Läufe</h2>
+                  <p>Wähle zuerst eine Woche aus. Danach öffnen sich die Prüfwerkzeuge für diesen Lauf.</p>
+                </div>
+              </div>
+              <div id="historyList" class="history-list"></div>
+            </section>
+
+            <section id="runInspector" class="panel inspector-panel">
+              <div id="emptyInspector" class="empty-inspector">
+                <div class="empty-icon">KW</div>
+                <h2>Historischen Lauf auswählen</h2>
+                <p>Nach Auswahl einer Woche erscheinen hier die Prüfwerkzeuge für Extraktion, Relevanz und Produktzuordnung.</p>
+              </div>
+
+              <div id="selectedInspector" class="hidden">
+                <div class="panel-header inspector-header">
+                  <div>
+                    <h2 id="selectedRunTitle">Ausgewählter Lauf</h2>
+                    <p id="selectedRunSubtitle">Wähle unten ein Prüfmodul aus.</p>
+                  </div>
+                  <div class="segmented qa-tabs">
+                    <button class="segment active" data-qa-view="pdfs">PDF-Relevanzprüfung</button>
+                    <button class="segment" data-qa-view="extraction">Extraktionsprüfung</button>
+                    <button class="segment" data-qa-view="relevance">Produktrelevanzprüfung</button>
+                    <button class="segment" data-qa-view="matching">Zuordnungsprüfung</button>
+                  </div>
+                </div>
+
+                <div id="qa-pdfs" class="qa-view active">
+                  <div class="qa-layout resizable-qa-layout" data-resize-key="pdfs">
+                    <section class="qa-list">
+                      <div class="toolbar">
+                        <input id="pdfSearch" type="search" placeholder="PDF, Übersprunggrund, Anbieter suchen..." />
+                        <select id="pdfDecisionFilter">
+                          <option value="all">Alle PDFs</option>
+                          <option value="relevant">Relevante PDFs</option>
+                          <option value="skipped">Übersprungene PDFs</option>
+                        </select>
+                        <select id="pdfSkipReasonFilter">
+                          <option value="">Alle Übersprunggründe</option>
+                        </select>
+                        <select id="pdfMistakeFilter">
+                          <option value="all">Alle Fehlermarkierungen</option>
+                          <option value="mistakes">Nur Fehler</option>
+                          <option value="comments">Mit Kommentar</option>
+                        </select>
+                        <select id="pdfSupplier"></select>
+                      </div>
+                      <div id="pdfStats" class="metric-row"></div>
+                      <div id="pdfSkipBreakdown" class="skip-breakdown"></div>
+                      <div id="pdfTable" class="data-table"></div>
+                    </section>
+                    <div class="qa-resizer" role="separator" aria-orientation="vertical" title="Bereiche breiter oder schmaler ziehen"></div>
+                    <section class="document-preview nested-preview">
+                      <div class="panel-header compact">
+                        <div>
+                          <h2>PDF-Dokument</h2>
+                          <p id="pdfPreviewMeta">Wähle eine PDF-Entscheidung aus, um das Dokument zu prüfen.</p>
+                        </div>
+                      </div>
+                      <div id="pdfPreviewBox" class="preview-box empty-state">Keine PDF ausgewählt.</div>
+                    </section>
+                  </div>
+                </div>
+
+                <div id="qa-extraction" class="qa-view">
+                  <div class="qa-layout resizable-qa-layout" data-resize-key="extraction">
+                    <section class="qa-list">
+                      <div class="toolbar">
+                        <input id="extractionSearch" type="search" placeholder="Produkt, Anbieter, Quelle suchen..." />
+                        <select id="extractionMistakeFilter">
+                          <option value="all">Alle Fehlermarkierungen</option>
+                          <option value="mistakes">Nur Fehler</option>
+                          <option value="comments">Mit Kommentar</option>
+                        </select>
+                        <select id="extractionSupplier"></select>
+                      </div>
+                      <div id="extractionStats" class="metric-row"></div>
+                      <div id="extractionTable" class="data-table"></div>
+                    </section>
+                    <div class="qa-resizer" role="separator" aria-orientation="vertical" title="Bereiche breiter oder schmaler ziehen"></div>
+                    <section class="document-preview nested-preview">
+                      <div class="panel-header compact">
+                        <div>
+                          <h2>Quelldokument</h2>
+                          <p id="previewMeta">Wähle eine Zeile aus, um die Quellseite zu prüfen.</p>
+                        </div>
+                      </div>
+                      <div id="previewBox" class="preview-box empty-state">Kein Produkt ausgewählt.</div>
+                    </section>
+                  </div>
+                </div>
+
+                <div id="qa-relevance" class="qa-view">
+                  <div class="toolbar relevance-toolbar">
+                    <input id="relevanceSearch" type="search" placeholder="Produkt, Grund, Marke suchen..." />
+                    <select id="relevanceFilter">
+                      <option value="all">Alle Produkte</option>
+                      <option value="ja">Relevant = Ja</option>
+                      <option value="nein">Relevant = Nein</option>
+                      <option value="time">Zeitlich relevant = Ja</option>
+                    </select>
+                    <select id="relevanceReasonFilter">
+                      <option value="">Alle Gründe</option>
+                    </select>
+                    <select id="relevanceMistakeFilter">
+                      <option value="all">Alle Fehlermarkierungen</option>
+                      <option value="mistakes">Nur Fehler</option>
+                      <option value="comments">Mit Kommentar</option>
+                    </select>
+                    <select id="relevanceSupplier"></select>
+                  </div>
+                  <div id="relevanceStats" class="metric-row"></div>
+                  <div id="relevanceTable" class="data-table"></div>
+                </div>
+
+                <div id="qa-matching" class="qa-view">
+                  <div class="matching-topline">
+                    <div class="toolbar">
+                      <input id="matchingSearch" type="search" placeholder="Produkt, Kategorie, Wettbewerber suchen..." />
+                      <select id="matchingFilter">
+                        <option value="all">Alle Gruppen</option>
+                        <option value="multi">Von 2+ Wettbewerbern gematcht</option>
+                        <option value="single">Nur ein Anbieter</option>
+                      </select>
+                      <select id="matchingMistakeFilter">
+                        <option value="all">Alle Fehlermarkierungen</option>
+                        <option value="mistakes">Nur Fehler</option>
+                        <option value="comments">Mit Kommentar</option>
+                      </select>
+                      <select id="matchingReasonFilter" class="hidden">
+                        <option value="">Alle Prüfgründe</option>
+                      </select>
+                    </div>
+                    <div class="segmented">
+                      <button class="segment active" data-match-tab="final">Finale Liste</button>
+                      <button class="segment" data-match-tab="short">Kurz</button>
+                      <button class="segment" data-match-tab="review">Prüfung</button>
+                    </div>
+                  </div>
+                  <div id="matchingStats" class="metric-row"></div>
+                  <div id="matchingTable" class="data-table matching-table"></div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

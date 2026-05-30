@@ -35,6 +35,29 @@ def validate_pdf(pdf_path: str, min_pages: int = 1) -> int:
     raise RuntimeError(f"Could not determine page count for {pdf.name}")
 
 
+def _page_image_is_valid(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    try:
+        from PIL import Image
+    except Exception:
+        return True
+    try:
+        with Image.open(path) as image:
+            image.verify()
+        return True
+    except Exception:
+        return False
+
+
+def _remove_page_images(output_dir: Path, fmt: str) -> None:
+    for image_path in output_dir.glob(f"page-*.{fmt}"):
+        try:
+            image_path.unlink()
+        except OSError as exc:
+            logger.warning("Could not remove partial image %s: %s", image_path, exc)
+
+
 def pdf_to_images(
     pdf_path: str,
     output_dir: str,
@@ -44,71 +67,134 @@ def pdf_to_images(
     pdf = Path(pdf_path)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    validate_pdf(str(pdf))
+    page_count = validate_pdf(str(pdf))
     started = time.perf_counter()
 
     prefix = out / "page"
     existing = sorted(out.glob(f"page-*.{fmt}"))
     if existing:
-        logger.info(f"Images already exist for {pdf.name}, skipping conversion")
+        invalid_existing = [p for p in existing if not _page_image_is_valid(p)]
+        if len(existing) == page_count and not invalid_existing:
+            logger.info(f"Images already exist for {pdf.name}, skipping conversion")
+            log_event(
+                logger,
+                f"Reused existing PDF page images for {pdf.name}",
+                event="pdf_to_images",
+                status="cached",
+                source_file=str(pdf),
+                output_dir=str(out),
+                image_count=len(existing),
+            )
+            return [str(p) for p in existing]
+
+        logger.warning(
+            "Removing incomplete or invalid cached page images for %s: expected %d, found %d, invalid %d",
+            pdf.name,
+            page_count,
+            len(existing),
+            len(invalid_existing),
+        )
         log_event(
             logger,
-            f"Reused existing PDF page images for {pdf.name}",
+            f"Discarded incomplete PDF page image cache for {pdf.name}",
             event="pdf_to_images",
-            status="cached",
+            status="cache_invalid",
             source_file=str(pdf),
             output_dir=str(out),
             image_count=len(existing),
+            expected_image_count=page_count,
+            invalid_image_count=len(invalid_existing),
         )
-        return [str(p) for p in existing]
+        _remove_page_images(out, fmt)
 
-    logger.info(f"Converting {pdf.name} to images at {dpi} DPI...")
-    log_event(
-        logger,
-        f"PDF to images started for {pdf.name}",
-        event="pdf_to_images",
-        status="start",
-        source_file=str(pdf),
-        output_dir=str(out),
-        dpi=dpi,
-        format=fmt,
-    )
-    cmd = [
-        "pdftoppm",
-        "-r", str(dpi),
-        f"-{fmt}",
-        str(pdf),
-        str(prefix),
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        logger.error(f"pdftoppm failed: {result.stderr}")
+    retry_dpis = []
+    for candidate_dpi in [dpi, 180, 150]:
+        if candidate_dpi > 0 and candidate_dpi not in retry_dpis:
+            retry_dpis.append(candidate_dpi)
+
+    last_error = ""
+    for attempt, attempt_dpi in enumerate(retry_dpis, start=1):
+        logger.info(f"Converting {pdf.name} to images at {attempt_dpi} DPI...")
         log_event(
             logger,
-            f"PDF to images failed for {pdf.name}",
+            f"PDF to images started for {pdf.name}",
             event="pdf_to_images",
-            level=logging.ERROR,
-            status="error",
+            status="start",
             source_file=str(pdf),
             output_dir=str(out),
-            error_message=result.stderr.strip(),
+            dpi=attempt_dpi,
+            format=fmt,
+            attempt=attempt,
+        )
+        cmd = [
+            "pdftoppm",
+            "-r", str(attempt_dpi),
+            f"-{fmt}",
+            str(pdf),
+            str(prefix),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            last_error = result.stderr.strip()
+            level = logging.ERROR if attempt == len(retry_dpis) else logging.WARNING
+            logger.log(level, "pdftoppm failed at %d DPI: %s", attempt_dpi, result.stderr)
+            log_event(
+                logger,
+                f"PDF to images failed for {pdf.name}",
+                event="pdf_to_images",
+                level=level,
+                status="error" if attempt == len(retry_dpis) else "retry",
+                source_file=str(pdf),
+                output_dir=str(out),
+                dpi=attempt_dpi,
+                error_message=last_error,
+                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+            )
+            _remove_page_images(out, fmt)
+            continue
+
+        images = sorted(out.glob(f"page-*.{fmt}"))
+        invalid_images = [p for p in images if not _page_image_is_valid(p)]
+        if len(images) != page_count or invalid_images:
+            last_error = (
+                f"pdftoppm created incomplete/invalid images at {attempt_dpi} DPI: "
+                f"expected {page_count}, found {len(images)}, invalid {len(invalid_images)}"
+            )
+            level = logging.ERROR if attempt == len(retry_dpis) else logging.WARNING
+            logger.log(level, last_error)
+            log_event(
+                logger,
+                f"PDF to images incomplete for {pdf.name}",
+                event="pdf_to_images",
+                level=level,
+                status="error" if attempt == len(retry_dpis) else "retry",
+                source_file=str(pdf),
+                output_dir=str(out),
+                dpi=attempt_dpi,
+                image_count=len(images),
+                expected_image_count=page_count,
+                invalid_image_count=len(invalid_images),
+                error_message=last_error,
+                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+            )
+            _remove_page_images(out, fmt)
+            continue
+
+        logger.info(f"Created {len(images)} images from {pdf.name} at {attempt_dpi} DPI")
+        log_event(
+            logger,
+            f"PDF to images completed for {pdf.name}",
+            event="pdf_to_images",
+            status="ok",
+            source_file=str(pdf),
+            output_dir=str(out),
+            image_count=len(images),
+            dpi=attempt_dpi,
             duration_ms=round((time.perf_counter() - started) * 1000, 2),
         )
-        raise RuntimeError(f"PDF conversion failed: {result.stderr}")
+        return [str(p) for p in images]
 
-    images = sorted(out.glob(f"page-*.{fmt}"))
-    logger.info(f"Created {len(images)} images from {pdf.name}")
-    log_event(
-        logger,
-        f"PDF to images completed for {pdf.name}",
-        event="pdf_to_images",
-        status="ok",
-        source_file=str(pdf),
-        output_dir=str(out),
-        image_count=len(images),
-        duration_ms=round((time.perf_counter() - started) * 1000, 2),
-    )
-    return [str(p) for p in images]
+    raise RuntimeError(f"PDF conversion failed: {last_error}")
 
 
 def pdf_first_page_to_image(

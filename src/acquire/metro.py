@@ -2,6 +2,7 @@ import logging
 import re
 import json
 import hashlib
+from io import BytesIO
 from datetime import date
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -220,9 +221,18 @@ class MetroScraper(BaseScraper):
             try:
                 download_trigger = viewer_page.get_by_text("PDF herunterladen", exact=False).first
                 download_trigger.wait_for(timeout=5000)
-                return self._click_and_save_pdf(viewer_page, download_trigger, data_dir, viewer_url)
+                dest = self._click_and_save_pdf(viewer_page, download_trigger, data_dir, viewer_url)
+                if dest:
+                    return dest
             except Exception:
-                return None
+                pass
+
+            return self._recover_publitas_viewer_as_pdf(
+                context,
+                viewer_url,
+                data_dir,
+                viewer_html=viewer_page.content(),
+            )
         finally:
             viewer_page.close()
 
@@ -245,6 +255,7 @@ class MetroScraper(BaseScraper):
         return None
 
     def _download_pdf_by_url(self, context, pdf_url: str, data_dir: Path, viewer_url: str) -> Path | None:
+        temp_dest = None
         try:
             response = context.request.get(pdf_url, timeout=60000)
             if response.status != 200:
@@ -254,10 +265,14 @@ class MetroScraper(BaseScraper):
                 return None
             filename = self._build_download_name(viewer_url, Path(urlparse(pdf_url).path).name or "metro.pdf")
             dest = data_dir / filename
-            dest.write_bytes(content)
-            validate_pdf(str(dest))
+            temp_dest = data_dir / f".{filename}.download.pdf"
+            temp_dest.write_bytes(content)
+            validate_pdf(str(temp_dest))
+            temp_dest.replace(dest)
             return dest
         except Exception as e:
+            if temp_dest and temp_dest.exists():
+                temp_dest.unlink()
             logger.debug(f"Metro direct PDF fetch failed for {viewer_url}: {e}")
             return None
 
@@ -273,15 +288,229 @@ class MetroScraper(BaseScraper):
         suggested = download.suggested_filename or "metro.pdf"
         filename = self._build_download_name(viewer_url, suggested)
         dest = data_dir / filename
-        download.save_as(str(dest))
+        temp_dest = data_dir / f".{filename}.download.pdf"
+        download.save_as(str(temp_dest))
         try:
-            validate_pdf(str(dest))
+            validate_pdf(str(temp_dest))
         except Exception as e:
-            if dest.exists():
-                dest.unlink()
+            if temp_dest.exists():
+                temp_dest.unlink()
             logger.warning(f"Discarding invalid Metro PDF {filename}: {e}")
             return None
+        temp_dest.replace(dest)
         return dest
+
+    def _recover_publitas_viewer_as_pdf(
+        self,
+        context,
+        viewer_url: str,
+        data_dir: Path,
+        max_pages: int = 180,
+        viewer_html: str | None = None,
+    ) -> Path | None:
+        if "prospekte.metro.de" not in viewer_url:
+            return None
+
+        try:
+            from PIL import Image
+        except Exception as e:
+            logger.debug("Metro Publitas image-PDF fallback unavailable: Pillow missing: %s", e)
+            return None
+
+        page_image_urls = self._publitas_spread_image_urls(context, viewer_url, viewer_html, max_pages)
+        if not page_image_urls:
+            page_image_urls = self._publitas_visible_page_image_urls(context, viewer_url, max_pages)
+
+        if not page_image_urls:
+            return None
+
+        pil_images = []
+        try:
+            for image_url in page_image_urls:
+                image_response = context.request.get(image_url, timeout=60000)
+                if image_response.status != 200:
+                    raise RuntimeError(f"image fetch returned HTTP {image_response.status}: {image_url}")
+                pil_images.append(Image.open(BytesIO(image_response.body())).convert("RGB"))
+
+            filename = self._build_download_name(viewer_url, "metro-publitas.pdf")
+            dest = data_dir / filename
+            temp_dest = data_dir / f".{filename}.download.pdf"
+            pil_images[0].save(
+                temp_dest,
+                "PDF",
+                save_all=True,
+                append_images=pil_images[1:],
+                resolution=150.0,
+            )
+            validate_pdf(str(temp_dest))
+            temp_dest.replace(dest)
+            logger.info(
+                "Recovered Metro Publitas viewer as image PDF: %s (%d pages)",
+                dest.name,
+                len(page_image_urls),
+            )
+            return dest
+        except Exception as e:
+            temp_dest = data_dir / f".{self._build_download_name(viewer_url, 'metro-publitas.pdf')}.download.pdf"
+            if temp_dest.exists():
+                temp_dest.unlink()
+            logger.warning("Metro Publitas image-PDF fallback failed for %s: %s", viewer_url, e)
+            return None
+        finally:
+            for image in pil_images:
+                try:
+                    image.close()
+                except Exception:
+                    pass
+
+    def _publitas_spread_image_urls(
+        self,
+        context,
+        viewer_url: str,
+        viewer_html: str | None,
+        max_pages: int,
+    ) -> list[str]:
+        html = viewer_html
+        if not html:
+            try:
+                response = context.request.get(viewer_url, timeout=60000)
+                if response.status == 200:
+                    html = response.text()
+            except Exception as e:
+                logger.debug("Metro Publitas metadata page fetch failed for %s: %s", viewer_url, e)
+                return []
+
+        data = self._extract_publitas_initial_data(html or "")
+        if not data:
+            return []
+
+        base_url = data.get("url") or data.get("config", {}).get("canonicalUrl") or viewer_url
+        cache_token = data.get("cacheToken")
+        spreads_url = urljoin(base_url.rstrip("/") + "/", "spreads.json")
+        if cache_token:
+            spreads_url = f"{spreads_url}?version={cache_token}"
+
+        spreads = []
+        page_number: int | None = 1
+        while page_number is not None:
+            separator = "&" if "?" in spreads_url else "?"
+            paged_spreads_url = f"{spreads_url}{separator}page={page_number}"
+            try:
+                response = context.request.get(paged_spreads_url, timeout=60000)
+            except Exception as e:
+                logger.debug("Metro Publitas spreads fetch failed for %s: %s", paged_spreads_url, e)
+                return []
+            if response.status != 200:
+                logger.debug(
+                    "Metro Publitas spreads fetch returned HTTP %s for %s",
+                    response.status,
+                    paged_spreads_url,
+                )
+                return []
+
+            try:
+                page_spreads = response.json()
+            except Exception as e:
+                logger.debug("Metro Publitas spreads JSON parse failed for %s: %s", paged_spreads_url, e)
+                return []
+            spreads.extend(page_spreads or [])
+
+            next_page = response.headers.get("x-next-page")
+            page_number = int(next_page) if next_page and next_page.isdigit() else None
+
+        pages = [
+            page
+            for spread in spreads or []
+            for page in (spread.get("pages", []) or [])
+        ]
+        if len(pages) > 120:
+            preferred_image_sizes = ("at800", "at1000", "at1200", "at1600")
+        elif len(pages) > 80:
+            preferred_image_sizes = ("at1000", "at1200", "at1600", "at800")
+        else:
+            preferred_image_sizes = ("at1600", "at1200", "at1000", "at800")
+
+        page_urls: list[str] = []
+        seen: set[str] = set()
+        for page in pages:
+            images = page.get("images", {}) or {}
+            image_path = next((images.get(size) for size in preferred_image_sizes if images.get(size)), None)
+            if not image_path:
+                continue
+            image_url = urljoin("https://view.publitas.com", image_path)
+            if image_url in seen:
+                continue
+            seen.add(image_url)
+            page_urls.append(image_url)
+            if len(page_urls) >= max_pages:
+                logger.warning(
+                    "Metro Publitas fallback capped %s at %d pages",
+                    viewer_url,
+                    max_pages,
+                )
+                return page_urls
+
+        return page_urls
+
+    def _publitas_visible_page_image_urls(self, context, viewer_url: str, max_pages: int) -> list[str]:
+        page_image_urls: list[str] = []
+        seen_images: set[str] = set()
+        for page_number in range(1, max_pages + 1):
+            page_url = self._publitas_page_url(viewer_url, page_number)
+            try:
+                response = context.request.get(page_url, timeout=60000)
+            except Exception as e:
+                logger.debug("Metro Publitas page fetch failed for %s: %s", page_url, e)
+                break
+            if response.status != 200:
+                break
+
+            image_url = self._extract_publitas_page_image_url(response.text(), page_url)
+            if not image_url or image_url in seen_images:
+                break
+            seen_images.add(image_url)
+            page_image_urls.append(image_url)
+
+        return page_image_urls
+
+    def _extract_publitas_initial_data(self, html: str) -> dict | None:
+        match = re.search(
+            r"var\s+data\s*=\s*(\{.*?\})\s*;\s*Reader\.Bootstrap\.init",
+            html,
+            flags=re.DOTALL,
+        )
+        if not match:
+            return None
+        try:
+            return json.loads(match.group(1))
+        except Exception as e:
+            logger.debug("Metro Publitas initial data parse failed: %s", e)
+            return None
+
+    def _publitas_page_url(self, viewer_url: str, page_number: int) -> str:
+        parsed = urlparse(viewer_url)
+        slug = parsed.path.strip("/").split("/")[0]
+        if not slug:
+            return viewer_url
+        return parsed._replace(
+            path=f"/{slug}/page/{page_number}",
+            params="",
+            query="",
+            fragment="",
+        ).geturl()
+
+    def _extract_publitas_page_image_url(self, html: str, page_url: str) -> str | None:
+        patterns = [
+            r'https:\\/\\/view\.publitas\.com\\/[^"\'< ]+?\\/pages\\/[^"\'< ]+?-at1600\.jpg',
+            r'https://view\.publitas\.com/[^"\'< ]+?/pages/[^"\'< ]+?-at1600\.jpg',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, html)
+            if not match:
+                continue
+            candidate = match.group(0).replace("\\/", "/")
+            return urljoin(page_url, candidate)
+        return None
 
     def _find_pdf_link(self, page):
         for selector in ("a[href*='/pdfs/']", "a[href*='.pdf']"):
