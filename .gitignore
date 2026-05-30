@@ -38,6 +38,8 @@ Referenz Data/
 *.xlsx
 *.xls
 *.csv
+!assets/
+!assets/list_logo.png
 dashboard_review_bundle_*.zip
 
 # Large/generated analysis dumps

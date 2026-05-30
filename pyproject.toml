@@ -14,9 +14,13 @@ dependencies = [
     "google-generativeai",
     "pdf2image",
     "Pillow",
+    "numpy",
     "pandas",
     "openpyxl",
+    "openai",
     "rapidfuzz",
+    "scikit-learn",
+    "tqdm",
     "twilio",
 ]
 

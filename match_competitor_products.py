@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -58,7 +59,8 @@ except Exception:  # pragma: no cover
 INPUT_FILE = "all_suppliers_relevant.csv"
 OUTPUT_FILE = "matched_competitor_products.xlsx"
 EMBEDDING_DIR = "embeddings/product_matching"
-LOGO_FILE = "/Users/lukas/Downloads/Screenshot_2026-05-10_at_21.36.40-removebg-preview.png"
+PROJECT_ROOT = Path(__file__).resolve().parent
+LOGO_FILE = str(PROJECT_ROOT / "assets" / "list_logo.png")
 ATTRIBUTE_MODEL = os.environ.get("DEEPSEEK_ATTRIBUTE_MODEL", os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"))
 PAIR_JUDGE_MODEL = os.environ.get("DEEPSEEK_PAIR_JUDGE_MODEL", os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"))
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
@@ -2426,7 +2428,7 @@ def prepare_logo_image(logo_path: Path | None) -> Path | None:
         return logo_path
     if logo_path.suffix.lower() != ".svg":
         return None
-    png_path = Path("/private/tmp") / f"{logo_path.stem}_{short_hash(str(logo_path))}.png"
+    png_path = Path(tempfile.gettempdir()) / f"{logo_path.stem}_{short_hash(str(logo_path))}.png"
     if png_path.exists() and png_path.stat().st_mtime >= logo_path.stat().st_mtime:
         return png_path
     try:
