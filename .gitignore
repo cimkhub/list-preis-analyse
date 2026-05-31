@@ -40,6 +40,8 @@ Referenz Data/
 *.csv
 !assets/
 !assets/list_logo.png
+!reference/
+!reference/canonical_products.csv
 dashboard_review_bundle_*.zip
 
 # Large/generated analysis dumps

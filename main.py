@@ -167,6 +167,10 @@ def run_pipeline(week: int | None = None, year: int | None = None,
     final_status = "failed"
     final_extra = None
     onedrive_upload_status = "not run"
+    matched: dict = {}
+    unmatched: list[RawProduct] = []
+    report_path: Path | None = None
+    legacy_report_status = "not run"
 
     log_event(
         logger,
@@ -633,47 +637,62 @@ def run_pipeline(week: int | None = None, year: int | None = None,
             onedrive_upload_status = "skipped"
             logger.info("OneDrive upload skipped by CLI flag")
 
-        # Stage 5: Harmonize
+        # Stage 5: Legacy harmonization/report.
+        # The LIST customer workbook above is the primary weekly output. This older
+        # canonical report is useful only when its reference file is available, so it
+        # must not make an otherwise successful run fail on a fresh server.
         logger.info("--- HARMONIZATION ---")
         ref_path = Path(config.storage.reference_dir) / "canonical_products.csv"
-        with log_stage(
-            logger,
-            "Harmonization",
-            event="harmonize",
-            product_count=len(all_products),
-            canonical_path=str(ref_path),
-        ):
-            canonicals = load_canonical_products(str(ref_path))
+        if not ref_path.exists():
+            legacy_report_status = f"skipped; missing {ref_path}"
+            logger.warning("Harmonization skipped: missing canonical reference file %s", ref_path)
+        else:
+            try:
+                with log_stage(
+                    logger,
+                    "Harmonization",
+                    event="harmonize",
+                    product_count=len(all_products),
+                    canonical_path=str(ref_path),
+                ):
+                    canonicals = load_canonical_products(str(ref_path))
 
-            matched, unmatched = match_all_products(
-                all_products, canonicals, config.pipeline.fuzzy_match_threshold
-            )
+                    matched, unmatched = match_all_products(
+                        all_products, canonicals, config.pipeline.fuzzy_match_threshold
+                    )
 
-            comparison = build_comparison(matched, canonicals)
+                    comparison = build_comparison(matched, canonicals)
 
-        # Stage 6: Report
-        logger.info("--- REPORT GENERATION ---")
-        with log_stage(
-            logger,
-            "Excel report generation",
-            event="report_generation",
-            matched_count=len(matched),
-            unmatched_count=len(unmatched),
-            product_count=len(all_products),
-        ):
-            report_path = generate_report(
-                comparison, unmatched, all_products, week, year,
-                config.storage.reports_dir,
-            )
+                # Stage 6: Report
+                logger.info("--- REPORT GENERATION ---")
+                with log_stage(
+                    logger,
+                    "Excel report generation",
+                    event="report_generation",
+                    matched_count=len(matched),
+                    unmatched_count=len(unmatched),
+                    product_count=len(all_products),
+                ):
+                    report_path = generate_report(
+                        comparison, unmatched, all_products, week, year,
+                        config.storage.reports_dir,
+                    )
+                legacy_report_status = f"written: {report_path}"
+            except Exception as exc:
+                legacy_report_status = f"failed: {exc}"
+                logger.warning("Legacy harmonization/report skipped after failure: %s", exc, exc_info=True)
 
-        logger.info(f"Pipeline complete! Report: {report_path}")
+        logger.info("Pipeline complete! Customer workbook: %s", matched_competitor_path)
+        if report_path:
+            logger.info("Legacy report: %s", report_path)
         logger.info(f"  Total products extracted: {len(all_products)}")
         logger.info(f"  Matched: {len(matched)}")
         logger.info(f"  Unmatched: {len(unmatched)}")
         final_status = "completed"
+        legacy_report_label = Path(report_path).name if report_path else legacy_report_status
         final_extra = (
             f"Done. Documents found: {total_documents_found}. "
-            f"Products: {len(all_products)}. Report: {Path(report_path).name}. "
+            f"Products: {len(all_products)}. Legacy report: {legacy_report_label}. "
             f"OneDrive: {onedrive_upload_status}."
         )
         log_event(
@@ -688,7 +707,8 @@ def run_pipeline(week: int | None = None, year: int | None = None,
             total_products=len(all_products),
             matched_count=len(matched),
             unmatched_count=len(unmatched),
-            report_path=str(report_path),
+            report_path=str(report_path) if report_path else "",
+            legacy_report_status=legacy_report_status,
             customer_workbook_path=str(matched_competitor_path),
             onedrive_upload_status=onedrive_upload_status,
         )
