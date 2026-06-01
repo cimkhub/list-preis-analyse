@@ -46,6 +46,42 @@ PACKAGED_REQUIRED_BRANDS = [
     "meemken",
     "aviko",
 ]
+CORE_FRESH_CATEGORY_REASONS = {
+    "fisch": "Fisch",
+    "fischtheke": "Fisch",
+    "fish": "Fisch",
+    "seafood": "Fisch",
+    "fleisch": "Fleisch",
+    "meat": "Fleisch",
+    "poultry": "Fleisch",
+    "gefluegel": "Fleisch",
+    "geflügel": "Fleisch",
+    "obst_gemuese": "Obst Gemüse",
+    "obst_gemüse": "Obst Gemüse",
+    "obst & gemüse": "Obst Gemüse",
+    "obst und gemüse": "Obst Gemüse",
+    "fruit": "Obst Gemüse",
+    "vegetables": "Obst Gemüse",
+}
+SEAFOOD_KEYWORDS = [
+    "fisch",
+    "lachs",
+    "seelachs",
+    "scholle",
+    "schollenfilet",
+    "seeteufel",
+    "dorade",
+    "forelle",
+    "garnelen",
+    "garnele",
+    "kammmuschel",
+    "muschel",
+    "octopus",
+    "oktopus",
+    "pulpo",
+    "tintenfisch",
+    "calamari",
+]
 
 
 def load_env_file(path: Path) -> None:
@@ -243,6 +279,20 @@ def explicit_packaged_reason(row: dict[str, str]) -> str | None:
     return None
 
 
+def explicit_core_food_reason(row: dict[str, str]) -> str | None:
+    category = " ".join((row.get("category") or "").casefold().replace("-", "_").split())
+    if category in CORE_FRESH_CATEGORY_REASONS:
+        return CORE_FRESH_CATEGORY_REASONS[category]
+
+    product_name = (row.get("product_name") or "").casefold()
+    description = (row.get("description") or "").casefold()
+    text = f"{product_name} {description}"
+    if any(keyword in text for keyword in SEAFOOD_KEYWORDS):
+        return "Fisch"
+
+    return None
+
+
 def has_required_packaged_brand(row: dict[str, str]) -> bool:
     product_name = (row.get("product_name") or "").casefold()
     description = (row.get("description") or "").casefold()
@@ -368,11 +418,13 @@ def build_prompt(row: dict[str, str]) -> str:
             "Return exactly this format: Ja|Reason or Nein|Reason.",
             "Reason must be 1-2 words, for example: Fresh Product, Oil, Cream, Quark, French fries, Milk, Cheese, Sausage, Frozen vegetables, Brand missing, Not Relevant.",
             "",
-            "Relevant = Ja if the offered product itself is a fresh food item, for example:",
-            "- fresh meat or poultry",
-            "- fresh fish or seafood",
-            "- fresh vegetables, salads, herbs, mushrooms, or potatoes",
-            "- fresh fruit",
+            "Relevant = Ja if the offered product itself is a core fresh-food product, for example:",
+            "- meat or poultry",
+            "- fish or seafood",
+            "- vegetables, salads, herbs, mushrooms, or potatoes",
+            "- fruit",
+            "Fish/seafood remains relevant if it is chilled, thawed/aufgetaut, frozen/gefroren, MSC-certified, or sold from a fish counter.",
+            "Do not answer Nein for fish/seafood only because it is frozen, thawed, or not explicitly called fresh.",
             "",
             "Relevant = Ja also for these packaged / not-fresh food products, but ONLY if one of the required brands is clearly present in product_name, brand, or description.",
             "Required brands for packaged / not-fresh products: ARO, Chef, Metro, Milram, Schleiz, Quality, economy, Edeka, Foodservice, Henkelmann, Meemken, Aviko.",
@@ -451,6 +503,10 @@ def classify_row(
     timeout_seconds: int,
     max_retries: int,
 ) -> tuple[int, str, str]:
+    core_reason = explicit_core_food_reason(row)
+    if core_reason:
+        return index, "Ja", core_reason
+
     explicit_reason = explicit_packaged_reason(row)
     if explicit_reason:
         return index, "Ja", explicit_reason
