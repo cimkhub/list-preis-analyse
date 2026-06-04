@@ -30,7 +30,9 @@ DEFAULT_WORKERS = 25
 DEFAULT_TIMEOUT_SECONDS = 120
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEFAULT_MAX_TOKENS = 80
+REASONER_MAX_TOKENS = 4096
 _THREAD_LOCAL = local()
 PACKAGED_REQUIRED_BRANDS = [
     "aro",
@@ -137,7 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--deepseek-model",
         default=DEFAULT_DEEPSEEK_MODEL,
-        help="DeepSeek model to use. Default: deepseek-chat",
+        help="DeepSeek model to use. Default: deepseek-v4-flash",
     )
     parser.add_argument(
         "--deepseek-timeout",
@@ -213,15 +215,35 @@ def extract_message_content(message: object) -> str:
 
 
 def extract_response_text(response_json: dict[str, Any]) -> str:
+    error = response_json.get("error")
+    if isinstance(error, dict):
+        message = error.get("message") or error.get("code") or error
+        raise RuntimeError(f"DeepSeek API error: {message}")
+
     choices = response_json.get("choices")
     if not isinstance(choices, list) or not choices:
         raise RuntimeError("DeepSeek response does not contain choices.")
 
-    message = choices[0].get("message", {})
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    message = choice.get("message", {})
     content = extract_message_content(message.get("content"))
     if not content:
-        raise RuntimeError("DeepSeek response did not contain text content.")
+        finish_reason = choice.get("finish_reason")
+        reasoning_content = ""
+        if isinstance(message, dict):
+            reasoning_content = extract_message_content(message.get("reasoning_content"))
+        detail = f" finish_reason={finish_reason!r}" if finish_reason else ""
+        if reasoning_content:
+            detail += f"; reasoning_without_final={reasoning_content[:120]!r}"
+        raise RuntimeError(f"DeepSeek response did not contain text content.{detail}")
     return content
+
+
+def max_tokens_for_model(model: str) -> int:
+    model_key = (model or "").casefold()
+    if "reasoner" in model_key or "pro" in model_key:
+        return REASONER_MAX_TOKENS
+    return DEFAULT_MAX_TOKENS
 
 
 def normalize_classification(raw_text: str) -> tuple[str, str]:
@@ -273,10 +295,46 @@ def explicit_packaged_reason(row: dict[str, str]) -> str | None:
         return "Frozen vegetables"
     if _is_large_packaged_product(product_name, description, row, ["käse", "kaese", "cheese"]):
         return "Cheese"
-    if _is_large_packaged_product(product_name, description, row, ["wurst", "sausage"]):
+    if _is_large_packaged_product(product_name, description, row, ["wurst", "würst", "wuerst", "wiener", "sausage"]):
         return "Sausage"
 
     return None
+
+
+def explicit_exclusion_reason(row: dict[str, str]) -> str | None:
+    if _is_packaged_keyword_product(row) and not has_required_packaged_brand(row):
+        return "Brand missing"
+    return None
+
+
+def _is_packaged_keyword_product(row: dict[str, str]) -> bool:
+    product_name = (row.get("product_name") or "").casefold()
+    description = (row.get("description") or "").casefold()
+    category = (row.get("category") or "").casefold()
+    text = f"{product_name} {description} {category}"
+    return any(
+        term in text
+        for term in [
+            "öl",
+            "oel",
+            "oil",
+            "sahne",
+            "cream",
+            "quark",
+            "pommes",
+            "french fries",
+            "milch",
+            "milk",
+            "käse",
+            "kaese",
+            "cheese",
+            "wurst",
+            "würst",
+            "wuerst",
+            "wiener",
+            "sausage",
+        ]
+    )
 
 
 def explicit_core_food_reason(row: dict[str, str]) -> str | None:
@@ -482,7 +540,7 @@ def call_deepseek(
             },
         ],
         "temperature": 0,
-        "max_tokens": 20,
+        "max_tokens": max_tokens_for_model(model),
         "stream": False,
     }
     headers = {
@@ -510,6 +568,10 @@ def classify_row(
     explicit_reason = explicit_packaged_reason(row)
     if explicit_reason:
         return index, "Ja", explicit_reason
+
+    exclusion_reason = explicit_exclusion_reason(row)
+    if exclusion_reason:
+        return index, "Nein", exclusion_reason
 
     prompt = build_prompt(row)
     product_name = row.get("product_name", "").strip() or "<unknown product>"

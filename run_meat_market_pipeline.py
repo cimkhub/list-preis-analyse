@@ -229,7 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--deepseek-model",
-        default=os.environ.get("DEEPSEEK_MODEL", "deepseek-reasoner"),
+        default=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro"),
         help="DeepSeek model name",
     )
     parser.add_argument(

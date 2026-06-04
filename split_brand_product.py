@@ -28,7 +28,9 @@ DEFAULT_WORKERS = 25
 DEFAULT_TIMEOUT_SECONDS = 120
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEFAULT_MAX_TOKENS = 200
+REASONER_MAX_TOKENS = 800
 CACHE_PATH = ROOT / "embeddings" / "product_matching" / "brand_product_splits.jsonl"
 RELEVANT_VALUES = {"yes", "ja", "true", "1", "relevant", "x"}
 _THREAD_LOCAL = local()
@@ -191,6 +193,7 @@ def call_deepseek(
     timeout_seconds: int,
     prompt: str,
 ) -> dict[str, Any]:
+    max_tokens = REASONER_MAX_TOKENS if _is_reasoner_model(model) else DEFAULT_MAX_TOKENS
     response = get_session().post(
         base_url.rstrip("/") + "/chat/completions",
         headers={
@@ -204,17 +207,33 @@ def call_deepseek(
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0,
-            "max_tokens": 160,
+            "max_tokens": max_tokens,
             "stream": False,
         },
         timeout=timeout_seconds,
     )
     response.raise_for_status()
     payload = response.json()
-    content = (((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = error.get("message") or error.get("code") or error
+        raise RuntimeError(f"DeepSeek API error: {message}")
+    choice = ((payload.get("choices") or [{}])[0] or {})
+    message = choice.get("message") or {}
+    content = (message.get("content") or "").strip()
     if not content:
-        raise RuntimeError("DeepSeek response has no content")
+        finish_reason = choice.get("finish_reason")
+        reasoning_content = (message.get("reasoning_content") or "").strip()
+        detail = f" finish_reason={finish_reason!r}" if finish_reason else ""
+        if reasoning_content:
+            detail += f"; reasoning_without_final={reasoning_content[:120]!r}"
+        raise RuntimeError(f"DeepSeek response has no content.{detail}")
     return safe_json_loads(content)
+
+
+def _is_reasoner_model(model: str) -> bool:
+    model_key = (model or "").casefold()
+    return "reasoner" in model_key or "pro" in model_key
 
 
 def safe_json_loads(text: str) -> dict[str, Any]:

@@ -1,0 +1,127 @@
+HETZNER WEEKLY PIPELINE SETUP
+=============================
+
+Goal:
+Run the LIST price comparison pipeline automatically every Wednesday at 20:00
+on the Hetzner Ubuntu server, even if the Mac is closed.
+
+Run the commands below on the Hetzner server as user "pipeline".
+
+
+1) Go to the project
+--------------------
+
+cd ~/list-preis-analyse
+git pull
+source .venv/bin/activate
+
+
+2) Set German timezone
+----------------------
+
+sudo timedatectl set-timezone Europe/Berlin
+date
+
+
+3) Create the weekly runner script
+----------------------------------
+
+cat > ~/list-preis-analyse/run_weekly_pipeline.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+export TZ=Europe/Berlin
+export DISPLAY=:1
+
+cd "$HOME/list-preis-analyse"
+mkdir -p logs
+
+LOCK_FILE="/tmp/list_pipeline_weekly.lock"
+
+{
+  flock -n 9 || {
+    echo "$(date) Pipeline läuft bereits, breche ab."
+    exit 1
+  }
+
+  if ! vncserver -list | grep -q ":1"; then
+    echo "$(date) Starte VNC Display :1"
+    vncserver -localhost yes :1 -geometry 1920x1080 -depth 24
+  fi
+
+  WEEK="$(date +%V)"
+  YEAR="$(date +%G)"
+
+  echo "$(date) Starte Pipeline für KW${WEEK}_${YEAR}"
+
+  "$HOME/list-preis-analyse/.venv/bin/python" main.py \
+    --week "$WEEK" \
+    --year "$YEAR" \
+    --deepseek-model flash
+
+  echo "$(date) Pipeline abgeschlossen für KW${WEEK}_${YEAR}"
+
+} 9>"$LOCK_FILE"
+EOF
+
+chmod +x ~/list-preis-analyse/run_weekly_pipeline.sh
+
+
+4) Optional manual test
+-----------------------
+
+This starts the full pipeline immediately. Only run this if you want to test it now.
+
+~/list-preis-analyse/run_weekly_pipeline.sh
+
+
+5) Install the Wednesday 20:00 cron job
+---------------------------------------
+
+First open the crontab editor:
+
+crontab -e
+
+If asked for an editor, choose nano.
+
+Then add this line at the bottom:
+
+0 20 * * 3 /home/pipeline/list-preis-analyse/run_weekly_pipeline.sh >> /home/pipeline/list-preis-analyse/logs/cron_weekly.log 2>&1
+
+Save in nano:
+Ctrl+O
+Enter
+Ctrl+X
+
+
+6) Verify cron is installed
+---------------------------
+
+crontab -l
+
+You should see:
+
+0 20 * * 3 /home/pipeline/list-preis-analyse/run_weekly_pipeline.sh >> /home/pipeline/list-preis-analyse/logs/cron_weekly.log 2>&1
+
+
+7) Check logs after a scheduled run
+-----------------------------------
+
+cd ~/list-preis-analyse
+tail -n 200 logs/cron_weekly.log
+
+Weekly pipeline logs are also written here:
+
+logs/2026_KWXX.log
+logs/KWXX_2026/
+
+
+Important notes
+---------------
+
+- The Mac can be closed. The cron job runs on the Hetzner server.
+- VNC is started automatically if display :1 is not already running.
+- OneDrive upload should work as long as the shared OneDrive link does not ask for a new login or email code.
+- If OneDrive asks for login/code, the scheduled upload can fail or hang. In that case, connect via VNC and run the upload manually once.
+- The lock file prevents two weekly pipelines from running at the same time.
+

@@ -33,8 +33,8 @@ FORECAST_COLUMN = "Marktprognose"
 FINAL_SHEETS = ["Final Output", "Final Output Short"]
 TARGET_CATEGORIES = {"fleisch", "fisch", "obst & gemüse", "obst & gemuese", "obst_gemuese"}
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-DEEPSEEK_SIGNAL_MODEL = os.environ.get("DEEPSEEK_SIGNAL_MODEL", "deepseek-reasoner")
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+DEEPSEEK_SIGNAL_MODEL = os.environ.get("DEEPSEEK_SIGNAL_MODEL", "deepseek-v4-pro")
 BRAVE_NEWS_URL = "https://api.search.brave.com/res/v1/news/search"
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 REQUEST_TIMEOUT = 90
@@ -648,11 +648,21 @@ def normalize_signal_text(value: str) -> str:
         return ""
     # DeepSeek sometimes returns multiple semicolon-separated bullets despite the prompt.
     text = re.sub(r";\s*([+\-=])\s+", r"\n\1 ", text)
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    bullet_lines = [line for line in lines if line[:1] in {"+", "-", "="}]
+    lines = [normalize_signal_bullet(line) for line in text.splitlines() if line.strip()]
+    lines = [line for line in lines if line]
+    bullet_lines = [line for line in lines if line[:1] in {"+", "-", "±"}]
     if bullet_lines:
         return bullet_lines[0]
     return lines[0] if lines else ""
+
+
+def normalize_signal_bullet(value: str) -> str:
+    text = str(value or "").strip()
+    # "=" is a valid market shorthand for stable prices, but Excel treats a
+    # leading equals sign as a formula. Store stable signals with a text marker.
+    text = re.sub(r"^=\s*@?\s*", "± ", text)
+    text = re.sub(r"^@\s*", "", text)
+    return text.strip()
 
 
 def looks_english_signal(signal_text: str) -> bool:
@@ -827,7 +837,8 @@ def write_forecast_columns(wb, product_signals: dict[tuple[str, str], str]) -> i
             category = normalize_category(ws.cell(row_idx, category_col).value)
             product = str(ws.cell(row_idx, product_col).value or "").strip()
             signal = product_signals.get(product_key(category, product), "")
-            cell = ws.cell(row_idx, forecast_col, signal)
+            cell = ws.cell(row_idx, forecast_col)
+            set_excel_text(cell, signal)
             cell.alignment = Alignment(wrap_text=True, vertical="top")
             if signal:
                 updated += 1
@@ -842,6 +853,14 @@ def write_forecast_columns(wb, product_signals: dict[tuple[str, str], str]) -> i
             ws.auto_filter.ref = table_ref
         ws.cell(header_row, forecast_col).value = FORECAST_COLUMN
     return updated
+
+
+def set_excel_text(cell, value: Any) -> None:
+    text = "" if value is None else str(value)
+    if text.startswith("="):
+        text = normalize_signal_bullet(text)
+    cell.value = text
+    cell.data_type = "s"
 
 
 def sync_tables_to_range(ws, header_row: int, table_ref: str) -> None:

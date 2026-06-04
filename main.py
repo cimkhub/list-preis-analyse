@@ -34,10 +34,10 @@ from src.report.excel_report import generate_report
 
 
 DEEPSEEK_MODEL_ALIASES = {
-    "flash": ("DEEPSEEK_V4_FLASH_MODEL", "deepseek-chat"),
-    "v4-flash": ("DEEPSEEK_V4_FLASH_MODEL", "deepseek-chat"),
-    "pro": ("DEEPSEEK_V4_PRO_MODEL", "deepseek-reasoner"),
-    "v4-pro": ("DEEPSEEK_V4_PRO_MODEL", "deepseek-reasoner"),
+    "flash": ("DEEPSEEK_V4_FLASH_MODEL", "deepseek-v4-flash"),
+    "v4-flash": ("DEEPSEEK_V4_FLASH_MODEL", "deepseek-v4-flash"),
+    "pro": ("DEEPSEEK_V4_PRO_MODEL", "deepseek-v4-pro"),
+    "v4-pro": ("DEEPSEEK_V4_PRO_MODEL", "deepseek-v4-pro"),
 }
 
 
@@ -765,8 +765,8 @@ def main():
     parser.add_argument("--deepseek-model", default="flash",
                         help=(
                             "DeepSeek model profile or exact model id. Use 'flash' or 'pro'. "
-                            "flash maps to DEEPSEEK_V4_FLASH_MODEL or deepseek-chat; "
-                            "pro maps to DEEPSEEK_V4_PRO_MODEL or deepseek-reasoner."
+                            "flash maps to DEEPSEEK_V4_FLASH_MODEL or deepseek-v4-flash; "
+                            "pro maps to DEEPSEEK_V4_PRO_MODEL or deepseek-v4-pro."
                         ))
     parser.add_argument("--config", type=str, default="config.yaml",
                         help="Config file path")
