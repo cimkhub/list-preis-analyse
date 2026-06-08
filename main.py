@@ -40,6 +40,11 @@ DEEPSEEK_MODEL_ALIASES = {
     "v4-pro": ("DEEPSEEK_V4_PRO_MODEL", "deepseek-v4-pro"),
 }
 
+ADDITIONAL_ONEDRIVE_URL = (
+    "https://listgs-my.sharepoint.com/:f:/g/personal/l_kornblum_list-goslar_com/"
+    "IgDnGmx_nK7IRY7o9R4SHweyAcIUGjZTepVdKaP8sCrSZzY?e=UC9vdF"
+)
+
 
 def resolve_deepseek_model(value: str | None) -> tuple[str, str]:
     requested = (value or "flash").strip()
@@ -122,6 +127,7 @@ def run_pipeline(week: int | None = None, year: int | None = None,
                  skip_market_forecast: bool = False,
                  skip_onedrive_upload: bool = False,
                  onedrive_url: str | None = None,
+                 additional_onedrive_url: str | None = ADDITIONAL_ONEDRIVE_URL,
                  onedrive_login_pause: bool = False,
                  deepseek_model: str = "flash"):
     config = load_config()
@@ -584,55 +590,72 @@ def run_pipeline(week: int | None = None, year: int | None = None,
         except Exception as exc:
             logger.warning("Final customer workbook cleanup failed: %s", exc, exc_info=True)
 
-        # Stage 4d: Upload the final customer workbook to the shared LIST OneDrive folder.
+        # Stage 4d: Upload the final customer workbook to the shared LIST OneDrive folders.
         # This uses the browser UI because the client folder is accessible in the browser,
         # but not reliably through Microsoft Graph shared-link APIs.
         if not skip_onedrive_upload:
             logger.info("--- ONEDRIVE UPLOAD ---")
-            upload_command = [
-                sys.executable,
-                str(Path(__file__).parent / "upload_to_onedrive_browser.py"),
-                "--file",
-                str(matched_competitor_path),
-                "--filename",
-                matched_competitor_path.name,
-                "--timeout",
-                "240",
+            upload_targets: list[tuple[str, str | None]] = [
+                ("primary", onedrive_url),
             ]
-            if onedrive_url:
-                upload_command.extend(["--target-url", onedrive_url])
-            if not onedrive_login_pause:
-                upload_command.append("--no-login-pause")
+            if additional_onedrive_url:
+                upload_targets.append(("additional", additional_onedrive_url))
 
-            try:
-                with log_stage(
-                    logger,
-                    "OneDrive browser upload",
-                    event="onedrive_upload",
-                    workbook=str(matched_competitor_path),
-                    filename=matched_competitor_path.name,
-                ):
-                    run_logged_subprocess(
-                        upload_command,
-                        logger=logger,
-                        label="onedrive_upload",
+            upload_statuses: list[str] = []
+            for target_label, target_url in upload_targets:
+                upload_command = [
+                    sys.executable,
+                    str(Path(__file__).parent / "upload_to_onedrive_browser.py"),
+                    "--file",
+                    str(matched_competitor_path),
+                    "--filename",
+                    matched_competitor_path.name,
+                    "--timeout",
+                    "240",
+                ]
+                if target_url:
+                    upload_command.extend(["--target-url", target_url])
+                if not onedrive_login_pause:
+                    upload_command.append("--no-login-pause")
+
+                try:
+                    with log_stage(
+                        logger,
+                        f"OneDrive browser upload ({target_label})",
+                        event="onedrive_upload",
+                        target=target_label,
+                        target_url=target_url or "default",
+                        workbook=str(matched_competitor_path),
+                        filename=matched_competitor_path.name,
+                    ):
+                        run_logged_subprocess(
+                            upload_command,
+                            logger=logger,
+                            label=f"onedrive_upload_{target_label}",
+                        )
+                    upload_statuses.append(f"{target_label}: uploaded")
+                    logger.info(
+                        "Uploaded final customer workbook to OneDrive (%s): %s",
+                        target_label,
+                        matched_competitor_path.name,
                     )
-                onedrive_upload_status = "uploaded"
-                logger.info("Uploaded final customer workbook to OneDrive: %s", matched_competitor_path.name)
-            except Exception as exc:
-                onedrive_upload_status = f"upload failed: {exc}"
-                logger.warning("OneDrive upload failed: %s", exc, exc_info=True)
-                log_event(
-                    logger,
-                    "OneDrive upload failed",
-                    event="onedrive_upload",
-                    status="error",
-                    workbook=str(matched_competitor_path),
-                    filename=matched_competitor_path.name,
-                    error_type=type(exc).__name__,
-                    error_message=str(exc),
-                    exc_info=True,
-                )
+                except Exception as exc:
+                    upload_statuses.append(f"{target_label}: failed: {exc}")
+                    logger.warning("OneDrive upload failed (%s): %s", target_label, exc, exc_info=True)
+                    log_event(
+                        logger,
+                        "OneDrive upload failed",
+                        event="onedrive_upload",
+                        status="error",
+                        target=target_label,
+                        target_url=target_url or "default",
+                        workbook=str(matched_competitor_path),
+                        filename=matched_competitor_path.name,
+                        error_type=type(exc).__name__,
+                        error_message=str(exc),
+                        exc_info=True,
+                    )
+            onedrive_upload_status = "; ".join(upload_statuses)
         else:
             onedrive_upload_status = "skipped"
             logger.info("OneDrive upload skipped by CLI flag")
@@ -760,6 +783,9 @@ def main():
                         help="Skip browser-based upload of the final Artikelvergleich workbook to OneDrive")
     parser.add_argument("--onedrive-url",
                         help="Override the shared OneDrive folder URL used by the browser uploader")
+    parser.add_argument("--additional-onedrive-url",
+                        default=ADDITIONAL_ONEDRIVE_URL,
+                        help="Additional shared OneDrive/SharePoint folder URL for the final workbook upload")
     parser.add_argument("--onedrive-login-pause", action="store_true",
                         help="Pause browser upload so you can manually complete Microsoft login/email-code verification")
     parser.add_argument("--deepseek-model", default="flash",
@@ -782,6 +808,7 @@ def main():
         skip_market_forecast=args.skip_market_forecast,
         skip_onedrive_upload=args.skip_onedrive_upload,
         onedrive_url=args.onedrive_url,
+        additional_onedrive_url=args.additional_onedrive_url,
         onedrive_login_pause=args.onedrive_login_pause,
         deepseek_model=args.deepseek_model,
     )
