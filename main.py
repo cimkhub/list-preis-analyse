@@ -129,7 +129,7 @@ def run_pipeline(week: int | None = None, year: int | None = None,
                  onedrive_url: str | None = None,
                  additional_onedrive_url: str | None = ADDITIONAL_ONEDRIVE_URL,
                  onedrive_login_pause: bool = False,
-                 deepseek_model: str = "flash"):
+                 deepseek_model: str = "pro"):
     config = load_config()
 
     if week is None or year is None:
@@ -788,7 +788,7 @@ def main():
                         help="Additional shared OneDrive/SharePoint folder URL for the final workbook upload")
     parser.add_argument("--onedrive-login-pause", action="store_true",
                         help="Pause browser upload so you can manually complete Microsoft login/email-code verification")
-    parser.add_argument("--deepseek-model", default="flash",
+    parser.add_argument("--deepseek-model", default="pro",
                         help=(
                             "DeepSeek model profile or exact model id. Use 'flash' or 'pro'. "
                             "flash maps to DEEPSEEK_V4_FLASH_MODEL or deepseek-v4-flash; "
