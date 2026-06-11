@@ -567,7 +567,7 @@ def normalize_attribute_item(product_id: str, data: dict[str, Any]) -> dict[str,
     for key in ["commercially_relevant_attributes", "do_not_merge_with"]:
         if not isinstance(item.get(key), list):
             item[key] = []
-    item["attribute_confidence"] = int(to_float(item.get("attribute_confidence")) or 0)
+    item["attribute_confidence"] = normalize_confidence(item.get("attribute_confidence"))
     return item
 
 
@@ -754,6 +754,15 @@ def to_float(value: Any) -> float | None:
         return float(text) if text else None
     except Exception:
         return None
+
+
+def normalize_confidence(value: Any) -> int:
+    score = to_float(value)
+    if score is None:
+        return 0
+    if 0 < score <= 1:
+        score *= 100
+    return max(0, min(100, int(round(score))))
 
 
 def safe_json_loads(text: str) -> dict[str, Any]:
@@ -1109,9 +1118,10 @@ def dedupe_same_supplier_products(
     pair_workers: int,
     top_k: int,
 ) -> tuple[pd.DataFrame, int]:
+    df, deterministic_removed = dedupe_exact_same_supplier_offers(df)
     candidates = generate_same_supplier_duplicate_candidates(df, attributes, embeddings, top_k)
     if not candidates:
-        return df, 0
+        return df, deterministic_removed
 
     print(f"Same-supplier duplicate candidates: {len(candidates)}")
     pair_rows, _ = judge_pairs(
@@ -1129,7 +1139,7 @@ def dedupe_same_supplier_products(
         if same_supplier_duplicate_decision(row)
     ]
     if not duplicate_edges:
-        return df, 0
+        return df, deterministic_removed
 
     duplicate_groups = build_duplicate_groups(df["product_id"].tolist(), duplicate_edges)
     row_by_id = {row["product_id"]: row for row in df.to_dict("records")}
@@ -1144,11 +1154,86 @@ def dedupe_same_supplier_products(
         remove_ids.update(p["product_id"] for p in products if p["product_id"] != keeper["product_id"])
 
     if not remove_ids:
-        return df, 0
+        return df, deterministic_removed
 
     kept = df.loc[~df["product_id"].isin(remove_ids)].copy().reset_index(drop=True)
     print_same_supplier_dedupe_summary(row_by_id, keep_ids, remove_ids)
+    return kept, deterministic_removed + len(remove_ids)
+
+
+def dedupe_exact_same_supplier_offers(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    groups: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
+    for row in df.to_dict("records"):
+        key = exact_same_supplier_offer_key(row)
+        if key:
+            groups[key].append(row)
+
+    remove_ids: set[str] = set()
+    keep_ids: set[str] = set()
+    row_by_id = {row["product_id"]: row for row in df.to_dict("records")}
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        keeper = choose_longest_valid_offer(group)
+        keep_ids.add(keeper["product_id"])
+        remove_ids.update(row["product_id"] for row in group if row["product_id"] != keeper["product_id"])
+
+    if not remove_ids:
+        return df, 0
+
+    print_same_supplier_dedupe_summary(row_by_id, keep_ids, remove_ids)
+    kept = df.loc[~df["product_id"].isin(remove_ids)].copy().reset_index(drop=True)
     return kept, len(remove_ids)
+
+
+def exact_same_supplier_offer_key(row: dict[str, Any]) -> tuple[str, ...] | None:
+    product = get(row, "product") or get(row, "product_name")
+    if not product.strip():
+        return None
+    return (
+        normalize_supplier(get(row, "supplier_norm") or get(row, "supplier")),
+        duplicate_key_text(get(row, "category")),
+        duplicate_key_text(get(row, "brand")),
+        duplicate_key_text(product),
+        duplicate_key_text(get(row, "description")),
+        duplicate_key_text(get(row, "origin")),
+        duplicate_key_number(get(row, "price")),
+        duplicate_key_number(get(row, "price_per_kg")),
+        duplicate_key_price_tiers(get(row, "price_tiers")),
+        get(row, "valid_from"),
+        get(row, "valid_to"),
+    )
+
+
+def duplicate_key_text(value: Any) -> str:
+    text = str(value or "").casefold()
+    return re.sub(r"[^a-z0-9äöüß]+", " ", text).strip()
+
+
+def duplicate_key_number(value: Any) -> str:
+    number = to_float(value)
+    return f"{number:.4f}" if number is not None else ""
+
+
+def duplicate_key_price_tiers(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        tiers = json.loads(text)
+    except Exception:
+        return duplicate_key_text(text)
+    if not isinstance(tiers, list):
+        return duplicate_key_text(text)
+    normalized = []
+    for tier in tiers:
+        if not isinstance(tier, dict):
+            continue
+        normalized.append({
+            "min_qty": duplicate_key_number(tier.get("min_qty")),
+            "price": duplicate_key_number(tier.get("price")),
+        })
+    return json.dumps(sorted(normalized, key=lambda item: (item["min_qty"], item["price"])), sort_keys=True)
 
 
 def generate_same_supplier_duplicate_candidates(
@@ -1223,7 +1308,7 @@ def exact_name_key(row: dict[str, Any]) -> str:
 
 def same_supplier_duplicate_decision(row: dict[str, Any]) -> bool:
     decision = row.get("decision")
-    confidence = int(to_float(row.get("confidence")) or 0)
+    confidence = normalize_confidence(row.get("confidence"))
     review = bool(row.get("should_human_review"))
     return (
         decision == "exact_match" and confidence >= 85
@@ -1426,7 +1511,7 @@ def second_round_judge_pairs(
 
 def needs_second_round(row: dict[str, Any]) -> bool:
     decision = row.get("decision")
-    confidence = int(to_float(row.get("confidence")) or 0)
+    confidence = normalize_confidence(row.get("confidence"))
     if decision == "no_match" and confidence >= 90:
         return False
     if decision == "exact_match" and confidence >= 92 and not bool(row.get("should_human_review")):
@@ -1483,6 +1568,8 @@ Gib ausschließlich striktes JSON zurück:
   "reason": "...",
   "manual_review_needed": false
 }}
+
+confidence ist immer eine ganze Zahl von 0 bis 100, nicht 0 bis 1.
 """
 
 
@@ -1519,7 +1606,7 @@ def normalize_second_judgement(pair_key: str, data: dict[str, Any]) -> dict[str,
         "pair_key": pair_key,
         "schema_version": SECOND_JUDGE_CACHE_VERSION,
         "final_action": action,
-        "confidence": int(to_float(data.get("confidence")) or 0),
+        "confidence": normalize_confidence(data.get("confidence")),
         "canonical_name": data.get("canonical_name", ""),
         "reason": data.get("reason", ""),
         "manual_review_needed": bool(data.get("manual_review_needed", action == "REVIEW")),
@@ -1541,7 +1628,7 @@ def second_round_fallback(pair_key: str, reason: str) -> dict[str, Any]:
 def apply_second_judgement(pair_row: dict[str, Any], judgement: dict[str, Any]) -> dict[str, Any]:
     row = dict(pair_row)
     action = judgement.get("final_action")
-    confidence = int(to_float(judgement.get("confidence")) or 0)
+    confidence = normalize_confidence(judgement.get("confidence"))
     reason = judgement.get("reason") or ""
     row["second_judge_action"] = action
     row["second_judge_confidence"] = confidence
@@ -1575,7 +1662,7 @@ def pair_debug_row(
         "block_reasons": "; ".join(hard_reasons),
         "soft_warnings": "; ".join(soft_warnings),
         "decision": decision.get("decision", "no_match"),
-        "confidence": int(to_float(decision.get("confidence")) or 0),
+        "confidence": normalize_confidence(decision.get("confidence")),
         "canonical_name": decision.get("canonical_name", ""),
         "reason": decision.get("reason", ""),
         "conflicting_attributes": "; ".join(map(str, decision.get("conflicting_attributes", []))),
@@ -1694,6 +1781,8 @@ Gib ausschließlich striktes JSON zurück:
   "reason": "...",
   "should_human_review": true
 }}
+
+confidence ist immer eine ganze Zahl von 0 bis 100, nicht 0 bis 1.
 """
 
 
@@ -1777,7 +1866,7 @@ def normalize_pair_decision(pair_key: str, cand: dict[str, Any], data: dict[str,
         "product_id_a": cand["product_id_a"],
         "product_id_b": cand["product_id_b"],
         "decision": decision,
-        "confidence": int(to_float(data.get("confidence")) or 0),
+        "confidence": normalize_confidence(data.get("confidence")),
         "canonical_name": data.get("canonical_name", ""),
         "matching_attributes": data.get("matching_attributes", []) if isinstance(data.get("matching_attributes"), list) else [],
         "conflicting_attributes": data.get("conflicting_attributes", []) if isinstance(data.get("conflicting_attributes"), list) else [],
@@ -1869,7 +1958,7 @@ def build_clusters(df: pd.DataFrame, attributes: dict[str, dict[str, Any]], pair
 
 def accepted_merge_edge(row: dict[str, Any]) -> bool:
     decision = row.get("decision")
-    confidence = int(row.get("confidence") or 0)
+    confidence = normalize_confidence(row.get("confidence"))
     review = bool(row.get("should_human_review"))
     return (
         decision == "exact_match" and confidence >= AUTO_MERGE_EXACT_THRESHOLD
@@ -1922,7 +2011,10 @@ def build_output_rows(df: pd.DataFrame, attributes: dict[str, dict[str, Any]], p
 def choose_canonical_name(cluster: dict[str, Any], attrs: list[dict[str, Any]]) -> str:
     best_pair = None
     for edge in cluster["pair_edges"]:
-        if edge.get("canonical_name") and (best_pair is None or int(edge.get("confidence") or 0) > int(best_pair.get("confidence") or 0)):
+        if edge.get("canonical_name") and (
+            best_pair is None
+            or normalize_confidence(edge.get("confidence")) > normalize_confidence(best_pair.get("confidence"))
+        ):
             best_pair = edge
     if best_pair:
         return best_pair["canonical_name"]
@@ -1936,7 +2028,7 @@ def choose_canonical_name(cluster: dict[str, Any], attrs: list[dict[str, Any]]) 
 
 
 def choose_primary_attr(attrs: list[dict[str, Any]]) -> dict[str, Any]:
-    return sorted(attrs, key=lambda a: int(a.get("attribute_confidence") or 0), reverse=True)[0]
+    return sorted(attrs, key=lambda a: normalize_confidence(a.get("attribute_confidence")), reverse=True)[0]
 
 
 def title_case(text: str) -> str:
@@ -1957,7 +2049,7 @@ def most_common(values: list[str]) -> str:
 def cluster_confidence(edges: list[dict[str, Any]]) -> int:
     if not edges:
         return 100
-    return int(round(sum(int(e.get("confidence") or 0) for e in edges) / len(edges)))
+    return int(round(sum(normalize_confidence(e.get("confidence")) for e in edges) / len(edges)))
 
 
 def cluster_review_reasons(products: list[dict[str, Any]], attrs: list[dict[str, Any]], edges: list[dict[str, Any]], suppliers: dict[str, list[dict[str, Any]]]) -> tuple[bool, list[str]]:
@@ -1966,7 +2058,7 @@ def cluster_review_reasons(products: list[dict[str, Any]], attrs: list[dict[str,
         reasons.append("multiple products from same supplier")
     if any(e.get("decision") == "close_comparable" and e.get("should_human_review") for e in edges):
         reasons.append("close comparable match needs review")
-    if any(int(e.get("confidence") or 0) < 80 and e.get("should_human_review") for e in edges):
+    if any(normalize_confidence(e.get("confidence")) < 80 and e.get("should_human_review") for e in edges):
         reasons.append("match confidence below exact threshold")
     if any(e.get("should_human_review") for e in edges):
         reasons.append("pair judge requested review")
