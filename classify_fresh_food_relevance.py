@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import os
 import re
 import time
@@ -34,6 +35,7 @@ DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_MAX_TOKENS = 1024
 REASONER_MAX_TOKENS = 4096
 _THREAD_LOCAL = local()
+LOGGER = logging.getLogger("birkenhof.relevance")
 PACKAGED_REQUIRED_BRANDS = [
     "aro",
     "chef",
@@ -598,6 +600,19 @@ def classify_row(
     raise AssertionError("unreachable")
 
 
+def log_relevance_decision(index: int, row: dict[str, str], label: str, reason: str) -> None:
+    product_name = normalize_product_name(row.get("product_name"))
+    LOGGER.info(
+        "Relevance decision row=%d supplier=%s category=%s product=%s decision=%s reason=%s",
+        index + 1,
+        row.get("supplier", "").strip(),
+        row.get("category", "").strip(),
+        product_name,
+        label,
+        reason,
+    )
+
+
 def save_rows(
     output_path: Path,
     fieldnames: list[str],
@@ -706,6 +721,7 @@ def run_relevance_classification(
             for future in as_completed(future_to_index):
                 index, label, reason = future.result()
                 results[index] = (label, reason)
+                log_relevance_decision(index, rows[index], label, reason)
                 completed += 1
                 if completed == len(rows) or completed % workers == 0:
                     print(f"Processed {completed}/{len(rows)} rows")
