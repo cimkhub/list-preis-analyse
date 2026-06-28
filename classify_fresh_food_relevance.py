@@ -17,6 +17,10 @@ from threading import local
 from typing import Any
 
 import requests
+from src.harmonize.customer_rules import (
+    apply_customer_category_overrides_to_row,
+    customer_exclusion_reason,
+)
 from src.report.parsed_csv import find_existing_combined_parsed_csv_path
 
 try:
@@ -563,6 +567,12 @@ def classify_row(
     timeout_seconds: int,
     max_retries: int,
 ) -> tuple[int, str, str]:
+    row = apply_customer_category_overrides_to_row(row)
+
+    customer_reason = customer_exclusion_reason(row)
+    if customer_reason:
+        return index, "Nein", customer_reason
+
     core_reason = explicit_core_food_reason(row)
     if core_reason:
         return index, "Ja", core_reason
@@ -693,6 +703,7 @@ def run_relevance_classification(
         raise RuntimeError("DEEPSEEK_API_KEY fehlt in .env oder in der Umgebung.")
 
     fieldnames, rows = load_rows(input_path, limit)
+    rows = [apply_customer_category_overrides_to_row(row) for row in rows]
     if not rows:
         raise RuntimeError(f"CSV contains no data rows: {input_path}")
 

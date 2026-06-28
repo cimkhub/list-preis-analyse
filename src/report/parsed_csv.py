@@ -3,6 +3,7 @@ import json
 import logging
 from pathlib import Path
 
+from src.harmonize.customer_rules import apply_customer_category_overrides_to_product
 from src.models import RawProduct
 from src.utils.logging_setup import log_event, log_stage
 
@@ -81,6 +82,7 @@ def find_existing_combined_parsed_csv_path(
 
 
 def _serialize_product(product: RawProduct) -> dict:
+    product = apply_customer_category_overrides_to_product(product)
     row = product.model_dump(mode="json")
     row["price_tiers"] = (
         json.dumps(row["price_tiers"], ensure_ascii=False)

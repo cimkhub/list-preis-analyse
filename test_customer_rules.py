@@ -1,0 +1,44 @@
+from classify_fresh_food_relevance import classify_row
+from src.harmonize.customer_rules import (
+    apply_customer_category_overrides,
+    apply_customer_category_overrides_to_row,
+    customer_exclusion_reason,
+)
+
+
+def test_customer_category_overrides_assign_requested_categories():
+    assert apply_customer_category_overrides("sonstiges", product_name="Erbsen tiefgefroren") == "tk"
+    assert apply_customer_category_overrides("fisch", product_name="Friesenkrone Heringssalat") == "mopro"
+    assert apply_customer_category_overrides("fleisch", product_name="Delikatess Bacon") == "wurst"
+    assert apply_customer_category_overrides("sonstiges", product_name="Rostbratwürste") == "wurst"
+
+
+def test_customer_category_overrides_move_glass_and_can_to_other():
+    assert apply_customer_category_overrides("wurst", product_name="Hot Dog Würstchen", unit="glas") == "sonstiges"
+    assert apply_customer_category_overrides("mopro", product_name="Kondensmilch Dose") == "sonstiges"
+
+
+def test_customer_exclusions_block_wine_in_other_and_blocked_brands():
+    wine_row = apply_customer_category_overrides_to_row(
+        {"category": "sonstiges", "product_name": "Wein trocken"}
+    )
+    assert customer_exclusion_reason(wine_row) == "Wine"
+
+    assert customer_exclusion_reason({"category": "tk", "product_name": "Iglo Rahmspinat"}) == "Blocked brand"
+    assert customer_exclusion_reason({"category": "mopro", "brand": "ja!", "product_name": "Milch"}) == "Blocked brand"
+
+
+def test_classify_row_applies_customer_exclusion_without_api_call():
+    index, label, reason = classify_row(
+        0,
+        {"category": "tk", "product_name": "Iglo Gemüse tiefgefroren"},
+        api_key="unused",
+        model="unused",
+        base_url="https://unused.invalid",
+        timeout_seconds=1,
+        max_retries=1,
+    )
+
+    assert index == 0
+    assert label == "Nein"
+    assert reason == "Blocked brand"

@@ -10,6 +10,7 @@ from google import genai
 from google.genai.types import GenerateContentConfig, Part
 
 from src.extract.prompts import SYSTEM_PROMPT, get_extraction_prompt
+from src.harmonize.customer_rules import apply_customer_category_overrides
 from src.models import RawProduct
 from src.utils.logging_setup import log_event
 
@@ -265,6 +266,12 @@ def _raw_items_to_products(
             category = item.get("category") or "sonstiges"
             if category == "sonstiges" and fallback_category:
                 category = fallback_category
+            category = apply_customer_category_overrides(
+                category,
+                product_name=item.get("product_name"),
+                description=item.get("description"),
+                unit=item.get("unit"),
+            )
             unit = item.get("unit") or "stueck"
             price = item.get("price")
             if price is None:

@@ -4,6 +4,7 @@ from datetime import date
 
 from src.models import RawProduct
 from src.convert.pdf_to_images import pdf_to_text, pdf_page_to_text, pdf_page_count
+from src.harmonize.customer_rules import apply_customer_category_overrides
 
 logger = logging.getLogger("birkenhof.extract.text")
 
@@ -101,8 +102,8 @@ def classify_category(text: str) -> str:
     text_lower = text.lower()
     for keyword, cat in CATEGORY_MAP.items():
         if keyword in text_lower:
-            return cat
-    return "sonstiges"
+            return apply_customer_category_overrides(cat, product_name=text)
+    return apply_customer_category_overrides("sonstiges", product_name=text)
 
 
 def extract_metro_text(pdf_path: str, valid_from: date | None = None, valid_to: date | None = None) -> list[RawProduct]:
