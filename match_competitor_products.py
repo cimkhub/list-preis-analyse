@@ -22,6 +22,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter, defaultdict
 from datetime import date
@@ -2106,7 +2107,7 @@ def format_offer_cell(product: dict[str, Any]) -> str:
         f"Menge: {amount_label(product)}",
         f"Produkt: {display_product_name(product) or 'unknown'}",
         f"Marke: {product.get('brand') or 'unknown'}",
-        f"Beschreibung: {wrap_excel_text(product.get('description'), 42) or 'unknown'}",
+        f"Beschreibung: {wrap_excel_text(product.get('description'), FINAL_TEXT_WRAP_WIDTH) or 'unknown'}",
         f"Herkunft: {product.get('origin') or 'unknown'}",
         f"Quelle: {source_label(product)}",
     ]
@@ -2124,7 +2125,7 @@ def format_offer_cell_short(product: dict[str, Any]) -> str:
         tiers.replace(" EUR", " €") if tiers != "unknown" else "",
         valid,
     ]
-    return " | ".join(part for part in parts if part and part != "unknown")
+    return "\n".join(part for part in parts if part and part != "unknown")
 
 
 def display_product_name(product: dict[str, Any]) -> str:
@@ -2263,6 +2264,16 @@ LIST_DARK = "27321F"
 LIST_LIGHT = "F6FAF0"
 LIST_LINE = "D9E6D0"
 FINAL_OUTPUT_VERTICAL_SEPARATOR_COLUMNS = {"Herkunft", "Edeka", "VK"}
+FINAL_TEXT_WRAP_WIDTH = 30
+FINAL_OUTPUT_ROW_MIN_HEIGHT = 22
+FINAL_OUTPUT_ROW_LINE_HEIGHT = 15
+FINAL_OUTPUT_ROW_PADDING = 8
+FINAL_OUTPUT_COMPACT_ROW_MAX_HEIGHT = 360
+FINAL_OUTPUT_FULL_ROW_MAX_HEIGHT = 220
+FINAL_OUTPUT_NUMBER_FORMATS = {
+    "EK": '#,##0.000 "€"',
+    "VK": '#,##0.00 "€"',
+}
 CATEGORY_LABELS = {
     "fisch": "Fisch",
     "fleisch": "Fleisch",
@@ -2275,6 +2286,124 @@ CATEGORY_LABELS = {
     "mopro": "Mopro",
     "sonstiges": "Sonstiges",
 }
+COUNTRY_CODE_ALIASES = {
+    "AL": ["albanien", "albania"],
+    "AD": ["andorra"],
+    "AM": ["armenien", "armenia"],
+    "AT": ["oesterreich", "osterreich", "austria"],
+    "AZ": ["aserbaidschan", "azerbaijan"],
+    "BY": ["belarus", "weissrussland", "weissrussland", "weißrussland"],
+    "BE": ["belgien", "belgium"],
+    "BA": ["bosnien", "bosnien herzegowina", "bosnia", "bosnia and herzegovina"],
+    "BG": ["bulgarien", "bulgaria"],
+    "HR": ["kroatien", "croatia"],
+    "CY": ["zypern", "cyprus"],
+    "CZ": ["tschechien", "tschechische republik", "czech republic", "czechia"],
+    "DK": ["daenemark", "danemark", "dänemark", "denmark"],
+    "EE": ["estland", "estonia"],
+    "FI": ["finnland", "finland"],
+    "FR": ["frankreich", "france"],
+    "GE": ["georgien", "georgia"],
+    "DE": ["deutschland", "germany", "bundesrepublik deutschland"],
+    "GR": ["griechenland", "greece"],
+    "HU": ["ungarn", "hungary"],
+    "IS": ["island", "iceland"],
+    "IE": ["irland", "ireland"],
+    "IT": ["italien", "italy"],
+    "KZ": ["kasachstan", "kazakhstan"],
+    "XK": ["kosovo"],
+    "LV": ["lettland", "latvia"],
+    "LI": ["liechtenstein"],
+    "LT": ["litauen", "lithuania"],
+    "LU": ["luxemburg", "luxembourg"],
+    "MT": ["malta"],
+    "MD": ["moldau", "moldawien", "moldova"],
+    "MC": ["monaco"],
+    "ME": ["montenegro"],
+    "NL": ["niederlande", "holland", "netherlands"],
+    "MK": ["nordmazedonien", "mazedonien", "north macedonia", "macedonia"],
+    "NO": ["norwegen", "norway"],
+    "PL": ["polen", "poland"],
+    "PT": ["portugal"],
+    "RO": ["rumaenien", "rumanien", "rumänien", "romania"],
+    "RU": ["russland", "russia", "russian federation"],
+    "SM": ["san marino"],
+    "RS": ["serbien", "serbia"],
+    "SK": ["slowakei", "slovakia"],
+    "SI": ["slowenien", "slovenia"],
+    "ES": ["spanien", "spain"],
+    "SE": ["schweden", "sweden"],
+    "CH": ["schweiz", "switzerland"],
+    "TR": ["tuerkei", "turkei", "türkei", "turkey"],
+    "UA": ["ukraine"],
+    "GB": ["grossbritannien", "großbritannien", "vereinigtes koenigreich", "vereinigtes konigreich", "vereinigtes königreich", "uk", "united kingdom", "great britain", "england", "schottland", "scotland", "wales", "nordirland", "northern ireland"],
+    "VA": ["vatikan", "vatican"],
+    "US": ["usa", "us", "vereinigte staaten", "united states", "united states of america", "amerika"],
+    "CA": ["kanada", "canada"],
+    "MX": ["mexiko", "mexico"],
+    "BR": ["brasilien", "brazil"],
+    "AR": ["argentinien", "argentina"],
+    "CL": ["chile"],
+    "PE": ["peru"],
+    "EC": ["ecuador"],
+    "CO": ["kolumbien", "colombia"],
+    "CR": ["costa rica"],
+    "UY": ["uruguay"],
+    "PY": ["paraguay"],
+    "BO": ["bolivien", "bolivia"],
+    "GT": ["guatemala"],
+    "HN": ["honduras"],
+    "NI": ["nicaragua"],
+    "PA": ["panama"],
+    "DO": ["dominikanische republik", "dominican republic"],
+    "CN": ["china", "volksrepublik china"],
+    "IN": ["indien", "india"],
+    "PK": ["pakistan"],
+    "BD": ["bangladesch", "bangladesh"],
+    "LK": ["sri lanka"],
+    "TH": ["thailand"],
+    "VN": ["vietnam", "viet nam"],
+    "ID": ["indonesien", "indonesia"],
+    "MY": ["malaysia"],
+    "PH": ["philippinen", "philippines"],
+    "TW": ["taiwan"],
+    "JP": ["japan"],
+    "KR": ["suedkorea", "sudkorea", "südkorea", "south korea"],
+    "AU": ["australien", "australia"],
+    "NZ": ["neuseeland", "new zealand"],
+    "ZA": ["suedafrika", "sudafrika", "südafrika", "south africa"],
+    "MA": ["marokko", "morocco"],
+    "TN": ["tunesien", "tunisia"],
+    "EG": ["aegypten", "agypten", "ägypten", "egypt"],
+    "KE": ["kenia", "kenya"],
+    "ET": ["aethiopien", "athiopien", "äthiopien", "ethiopia"],
+    "GH": ["ghana"],
+    "CI": ["elfenbeinkueste", "elfenbeinkuste", "elfenbeinküste", "cote d ivoire", "ivory coast"],
+    "SN": ["senegal"],
+    "NG": ["nigeria"],
+    "IL": ["israel"],
+    "JO": ["jordanien", "jordan"],
+    "LB": ["libanon", "lebanon"],
+    "AE": ["vereinigte arabische emirate", "united arab emirates", "uae"],
+    "SA": ["saudi arabien", "saudi arabia"],
+    "IR": ["iran"],
+}
+
+
+def normalize_country_alias(value: Any) -> str:
+    text = unicodedata.normalize("NFKD", str(value or "").casefold())
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+VALID_COUNTRY_CODES = set(COUNTRY_CODE_ALIASES)
+COUNTRY_CODE_BY_ALIAS = {
+    normalized_alias: code
+    for code, aliases in COUNTRY_CODE_ALIASES.items()
+    for normalized_alias in [normalize_country_alias(alias) for alias in aliases + [code]]
+}
+COUNTRY_ALIAS_PATTERNS = sorted(COUNTRY_CODE_BY_ALIAS.items(), key=lambda item: len(item[0]), reverse=True)
 
 
 def write_excel(output_path: Path, matched_rows: list[dict[str, Any]], review_rows: list[dict[str, Any]], pair_rows: list[dict[str, Any]], attribute_rows: list[dict[str, Any]], logo_path: Path | None = None) -> None:
@@ -2319,9 +2448,9 @@ def build_final_output_rows(matched_rows: list[dict[str, Any]], short: bool = Fa
         rows.append({
             "Kategorie": category_label(row.get("category", "")),
             "Produkt": product_name_from_offer_cells(row),
-            "Marke": row.get("brand", ""),
-            "Beschreibung": wrap_excel_text(row.get("description", ""), 42),
-            "Herkunft": row.get("origin", ""),
+            "_sort_brand": row.get("brand", ""),
+            "Beschreibung": final_output_description(row.get("description", ""), row.get("brand", "")),
+            "Herkunft": origin_country_codes(row.get("origin", "")),
             "Metro": row.get(f"Metro{suffix}", ""),
             "Selgros": row.get(f"Selgros{suffix}", ""),
             "Handelshof": row.get(f"Handelshof{suffix}", ""),
@@ -2331,6 +2460,54 @@ def build_final_output_rows(matched_rows: list[dict[str, Any]], short: bool = Fa
             "Notizen": "",
         })
     return sorted(rows, key=final_output_sort_key)
+
+
+def final_output_description(description: Any, brand: Any) -> str:
+    lines = []
+    description_text = wrap_excel_text(description, FINAL_TEXT_WRAP_WIDTH)
+    brand_text = str(brand or "").strip()
+    if description_text:
+        lines.append(description_text)
+    if brand_text:
+        lines.append(wrap_excel_text(f"Brand: {brand_text},", FINAL_TEXT_WRAP_WIDTH))
+    return "\n".join(line for line in lines if line)
+
+
+def origin_country_codes(origin: Any) -> str:
+    text = str(origin or "").strip()
+    if not text:
+        return ""
+    codes: list[str] = []
+    parts = [
+        part.strip()
+        for part in re.split(r"[,;/|+&\n]+|\b(?:und|oder|and|or)\b", text, flags=re.IGNORECASE)
+        if part.strip()
+    ]
+    for part in parts or [text]:
+        add_origin_codes(part, codes)
+    if not codes:
+        add_origin_codes(text, codes)
+    return ", ".join(codes) if codes else text
+
+
+def add_origin_codes(text: str, codes: list[str]) -> None:
+    stripped = text.strip()
+    if re.fullmatch(r"[A-Za-z]{2}", stripped):
+        code = stripped.upper()
+        if code in VALID_COUNTRY_CODES and code not in codes:
+            codes.append(code)
+        return
+    normalized = normalize_country_alias(stripped)
+    if not normalized:
+        return
+    exact_code = COUNTRY_CODE_BY_ALIAS.get(normalized)
+    if exact_code:
+        if exact_code not in codes:
+            codes.append(exact_code)
+        return
+    for alias, code in COUNTRY_ALIAS_PATTERNS:
+        if re.search(rf"(^| ){re.escape(alias)}($| )", normalized) and code not in codes:
+            codes.append(code)
 
 
 def product_name_from_offer_cells(row: dict[str, Any]) -> str:
@@ -2371,7 +2548,7 @@ def final_output_sort_key(row: dict[str, Any]) -> tuple:
         category_order_index(category),
         category.casefold(),
         str(row.get("Produkt", "")).casefold(),
-        str(row.get("Marke", "")).casefold(),
+        str(row.get("_sort_brand", "")).casefold(),
     )
 
 
@@ -2414,9 +2591,8 @@ def write_final_output_sheet(
     ws["D3"] = f"Erstellt am {time.strftime('%d.%m.%Y %H:%M')} | Datei: {output_path.name} | Artikelgruppen: {len(rows)}"
     ws["D3"].font = Font(size=9, color="6E7867")
 
-    ws["A5"] = "Kategorie"
-    ws["B5"] = "Produkt"
-    ws["C5"] = "Marke"
+    for col_idx, column in enumerate(FINAL_OUTPUT_COLUMNS[:3], 1):
+        ws.cell(5, col_idx, column)
     for cell in ws[5]:
         cell.font = Font(bold=True, color=LIST_DARK)
         cell.fill = PatternFill("solid", fgColor="EAF3DF")
@@ -2450,26 +2626,15 @@ def write_final_output_sheet(
                 bottom=Side(style="hair", color=LIST_LINE),
             )
             cell.alignment = Alignment(wrap_text=True, vertical="top")
+            if column in FINAL_OUTPUT_NUMBER_FORMATS:
+                cell.number_format = FINAL_OUTPUT_NUMBER_FORMATS[column]
     ws.freeze_panes = f"A{header_row + 1}"
     if rows:
         ws.auto_filter.ref = f"A{header_row}:{get_column_letter(len(columns))}{header_row + len(rows)}"
         table = Table(displayName=table_name, ref=f"A{header_row}:{get_column_letter(len(columns))}{header_row + len(rows)}")
         table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium4", showRowStripes=False)
         ws.add_table(table)
-    widths = {
-        "Kategorie": 18,
-        "Produkt": 34,
-        "Marke": 24,
-        "Beschreibung": 42,
-        "Herkunft": 24,
-        "Metro": 38,
-        "Selgros": 38,
-        "Handelshof": 38,
-        "Edeka": 38,
-        "EK": 14,
-        "VK": 14,
-        "Notizen": 34,
-    }
+    widths = final_output_column_widths(compact_rows)
     for idx, column in enumerate(columns, 1):
         ws.column_dimensions[get_column_letter(idx)].width = widths.get(column, 20)
     for row_idx in range(header_row + 1, ws.max_row + 1):
@@ -2483,8 +2648,39 @@ def final_output_row_height(ws, row_idx: int, columns: list[str], widths: dict[s
         if not value:
             continue
         max_lines = max(max_lines, estimated_excel_lines(value, widths.get(column, 20)))
-    max_height = 84 if compact_rows else 180
-    return min(max_height, max(22, 15 * max_lines + 6))
+    max_height = FINAL_OUTPUT_COMPACT_ROW_MAX_HEIGHT if compact_rows else FINAL_OUTPUT_FULL_ROW_MAX_HEIGHT
+    calculated_height = FINAL_OUTPUT_ROW_LINE_HEIGHT * max_lines + FINAL_OUTPUT_ROW_PADDING
+    return min(max_height, max(FINAL_OUTPUT_ROW_MIN_HEIGHT, calculated_height))
+
+
+def final_output_column_widths(compact_rows: bool) -> dict[str, int]:
+    if compact_rows:
+        return {
+            "Kategorie": 10,
+            "Produkt": 18,
+            "Beschreibung": 24,
+            "Herkunft": 7,
+            "Metro": 17,
+            "Selgros": 17,
+            "Handelshof": 17,
+            "Edeka": 17,
+            "EK": 9,
+            "VK": 9,
+            "Notizen": 16,
+        }
+    return {
+        "Kategorie": 14,
+        "Produkt": 26,
+        "Beschreibung": 30,
+        "Herkunft": 10,
+        "Metro": 30,
+        "Selgros": 30,
+        "Handelshof": 30,
+        "Edeka": 30,
+        "EK": 10,
+        "VK": 10,
+        "Notizen": 24,
+    }
 
 
 def estimated_excel_lines(value: str, column_width: int) -> int:
@@ -2543,7 +2739,7 @@ MATCHED_COLUMNS = [
 ]
 
 FINAL_OUTPUT_COLUMNS = [
-    "Kategorie", "Produkt", "Marke", "Beschreibung", "Herkunft",
+    "Kategorie", "Produkt", "Beschreibung", "Herkunft",
     "Metro", "Selgros", "Handelshof", "Edeka", "EK", "VK", "Notizen",
 ]
 

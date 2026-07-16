@@ -90,6 +90,73 @@ SEAFOOD_KEYWORDS = [
     "tintenfisch",
     "calamari",
 ]
+NON_FRESH_EXCLUSION_RULES = [
+    (
+        "Non Food",
+        [
+            r"\btoilettenpapier\b",
+            r"\bwc papier\b",
+            r"\bkuechenrolle\b",
+            r"\bküchenrolle\b",
+            r"\bserviette[n]?\b",
+            r"\breinigungsmittel\b",
+        ],
+    ),
+    (
+        "Sauce",
+        [
+            r"\bpizzasauce\b",
+            r"\bpizza sauce\b",
+            r"\bsauce\b",
+            r"\bsoße\b",
+            r"\bsosse\b",
+            r"\bpesto\b",
+        ],
+    ),
+    (
+        "Dip",
+        [
+            r"\bguacamole\b",
+            r"\bdip[s]?\b",
+            r"\baufstrich[e]?\b",
+            r"\bspread[s]?\b",
+        ],
+    ),
+    (
+        "Preserved",
+        [
+            r"\bgewuerzgurke[n]?\b",
+            r"\bgewürzgurke[n]?\b",
+            r"\bessiggurke[n]?\b",
+            r"\bsauerkonserve[n]?\b",
+            r"\bkonserve[n]?\b",
+            r"\beingemacht\b",
+            r"\beingelegt\b",
+            r"\bpickled\b",
+        ],
+    ),
+    (
+        "Prepared",
+        [
+            r"\bmariniert[e]?[nrms]?\b",
+            r"\bmarinade[n]?\b",
+            r"\bdelikatess\b",
+            r"\bsalat\b",
+            r"\bfeinkost\b",
+            r"\bfertiggericht[e]?\b",
+            r"\bready[ -]?to[ -]?eat\b",
+        ],
+    ),
+]
+PREPARED_FISH_PATTERNS = [
+    r"\bheringsfilet[s]?\b.*\bsahne\b",
+    r"\bsahne\b.*\bheringsfilet[s]?\b",
+    r"\bhering\b.*\b(sahne|salat|mariniert|marinade|sauce|soße|sosse)\b",
+    r"\b(sahne|salat|mariniert|marinade|sauce|soße|sosse)\b.*\bhering\b",
+    r"\bfischsalat\b",
+    r"\bmeeresfruechte[s]?alat\b",
+    r"\bmeeresfrüchte[s]?alat\b",
+]
 
 
 def load_env_file(path: Path) -> None:
@@ -308,9 +375,29 @@ def explicit_packaged_reason(row: dict[str, str]) -> str | None:
 
 
 def explicit_exclusion_reason(row: dict[str, str]) -> str | None:
+    strict_reason = explicit_non_fresh_exclusion_reason(row)
+    if strict_reason:
+        return strict_reason
     if _is_packaged_keyword_product(row) and not has_required_packaged_brand(row):
         return "Brand missing"
     return None
+
+
+def explicit_non_fresh_exclusion_reason(row: dict[str, str]) -> str | None:
+    text = _row_text(row)
+    if any(re.search(pattern, text) for pattern in PREPARED_FISH_PATTERNS):
+        return "Prepared Fish"
+    for reason, patterns in NON_FRESH_EXCLUSION_RULES:
+        if any(re.search(pattern, text) for pattern in patterns):
+            return reason
+    return None
+
+
+def _row_text(row: dict[str, str]) -> str:
+    return " ".join(
+        str(row.get(field) or "")
+        for field in ["brand", "product_name", "description", "category", "unit"]
+    ).casefold()
 
 
 def _is_packaged_keyword_product(row: dict[str, str]) -> bool:
@@ -482,12 +569,20 @@ def build_prompt(row: dict[str, str]) -> str:
             "Return exactly this format: Ja|Reason or Nein|Reason.",
             "Reason must be 1-2 words, for example: Fresh Product, Oil, Cream, Quark, French fries, Milk, Cheese, Sausage, Frozen vegetables, Brand missing, Not Relevant.",
             "",
+            "Hard exclusions: answer Nein when the offered product is any of these, even if category or product name contains fish, vegetables, fruit, cream, or a required brand:",
+            "- non-food or household goods, for example Toilettenpapier, Küchenrolle, cleaning products, packaging, kitchen equipment",
+            "- prepared, ready-to-eat, marinated, sauced, pickled, jarred, canned, preserved, deli, salad, dip, spread, or convenience products",
+            "- fish/seafood with sauce, marinade, cream/Sahne, salad preparation, dressing, or deli preparation",
+            "- processed fruit/vegetable products such as Pizzasauce, Guacamole, Gewürzgurken, pickled vegetables, antipasti, dips, spreads, sauces",
+            "Negative examples: Delikatess-Sahne-Heringsfilets => Nein|Prepared Fish; marinierte Produkte => Nein|Prepared; Pizzasauce => Nein|Sauce; Guacamole => Nein|Dip; Gewürzgurken => Nein|Preserved; Toilettenpapier => Nein|Non Food.",
+            "",
             "Relevant = Ja if the offered product itself is a core fresh-food product, for example:",
             "- meat or poultry",
             "- fish or seafood",
             "- vegetables, salads, herbs, mushrooms, or potatoes",
             "- fruit",
             "Fish/seafood remains relevant if it is chilled, thawed/aufgetaut, frozen/gefroren, MSC-certified, or sold from a fish counter.",
+            "Fish/seafood is relevant only as a raw/simple product such as whole fish, fillet, portion, shrimp, mussels, or seafood without sauce/marinade/deli preparation.",
             "Do not answer Nein for fish/seafood only because it is frozen, thawed, or not explicitly called fresh.",
             "",
             "Relevant = Ja also for these packaged / not-fresh food products, but ONLY if one of the required brands is clearly present in product_name, brand, or description.",
@@ -503,6 +598,8 @@ def build_prompt(row: dict[str, str]) -> str:
             "- frozen vegetables / Tiefkühl Gemüse",
             "- French fries / Pommes",
             "- milk / Milch",
+            "",
+            "Cream / Sahne is relevant only when the offered product itself is plain cream/Sahne. Do not classify prepared products containing Sahne, such as Sahne-Heringsfilets, as cream.",
             "",
             "For Käse and Wurst, use product_name, description, quantity, and unit to infer package size.",
             "Treat 0.5 kg, 500 g, 500 ml, 1 kg, 1.5 kg, 800 g Abtropfgewicht, or larger as at least 500 g.",
@@ -573,6 +670,10 @@ def classify_row(
     if customer_reason:
         return index, "Nein", customer_reason
 
+    exclusion_reason = explicit_exclusion_reason(row)
+    if exclusion_reason:
+        return index, "Nein", exclusion_reason
+
     core_reason = explicit_core_food_reason(row)
     if core_reason:
         return index, "Ja", core_reason
@@ -580,10 +681,6 @@ def classify_row(
     explicit_reason = explicit_packaged_reason(row)
     if explicit_reason:
         return index, "Ja", explicit_reason
-
-    exclusion_reason = explicit_exclusion_reason(row)
-    if exclusion_reason:
-        return index, "Nein", exclusion_reason
 
     prompt = build_prompt(row)
     product_name = row.get("product_name", "").strip() or "<unknown product>"

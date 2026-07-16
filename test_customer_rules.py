@@ -1,4 +1,4 @@
-from classify_fresh_food_relevance import classify_row
+from classify_fresh_food_relevance import build_prompt, classify_row, explicit_non_fresh_exclusion_reason
 from src.harmonize.customer_rules import (
     apply_customer_category_overrides,
     apply_customer_category_overrides_to_row,
@@ -42,3 +42,43 @@ def test_classify_row_applies_customer_exclusion_without_api_call():
     assert index == 0
     assert label == "Nein"
     assert reason == "Blocked brand"
+
+
+def test_non_fresh_exclusions_cover_customer_feedback_examples():
+    examples = [
+        ({"category": "fisch", "product_name": "Delikatess-Sahne-Heringsfilets"}, "Prepared Fish"),
+        ({"category": "fleisch", "product_name": "Marinierte Schweinesteaks"}, "Prepared"),
+        ({"category": "obst_gemuese", "product_name": "Pizzasauce"}, "Sauce"),
+        ({"category": "obst_gemuese", "product_name": "Guacamole"}, "Dip"),
+        ({"category": "obst_gemuese", "product_name": "Gewürzgurken"}, "Preserved"),
+        ({"category": "sonstiges", "product_name": "Toilettenpapier"}, "Non Food"),
+    ]
+
+    for row, reason in examples:
+        assert explicit_non_fresh_exclusion_reason(row) == reason
+
+
+def test_classify_row_applies_non_fresh_exclusions_before_core_category():
+    index, label, reason = classify_row(
+        0,
+        {"category": "fisch", "product_name": "Delikatess-Sahne-Heringsfilets"},
+        api_key="unused",
+        model="unused",
+        base_url="https://unused.invalid",
+        timeout_seconds=1,
+        max_retries=1,
+    )
+
+    assert index == 0
+    assert label == "Nein"
+    assert reason == "Prepared Fish"
+
+
+def test_relevance_prompt_mentions_customer_feedback_negative_examples():
+    prompt = build_prompt({"category": "obst_gemuese", "product_name": "Guacamole"})
+
+    assert "Delikatess-Sahne-Heringsfilets => Nein|Prepared Fish" in prompt
+    assert "Pizzasauce => Nein|Sauce" in prompt
+    assert "Guacamole => Nein|Dip" in prompt
+    assert "Gewürzgurken => Nein|Preserved" in prompt
+    assert "Toilettenpapier => Nein|Non Food" in prompt
