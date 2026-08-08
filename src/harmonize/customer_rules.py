@@ -62,20 +62,5 @@ def apply_customer_category_overrides_to_product(product: Any) -> Any:
     return product.model_copy(update={"category": category})
 
 
-def customer_exclusion_reason(row: dict[str, Any]) -> str | None:
-    category = str(row.get("category") or "").strip().casefold()
-    text = text_for_product_fields(
-        row.get("brand"),
-        row.get("product_name"),
-        row.get("description"),
-    ).casefold()
-
-    if category == "sonstiges" and _contains_any_word(text, ["wein"]):
-        return "Wine"
-    if _contains_any_word(text, ["iglo"]) or re.search(r"(?<![a-z0-9])ja!(?![a-z0-9])", text):
-        return "Blocked brand"
-    return None
-
-
 def _contains_any_word(text: str, words: list[str]) -> bool:
     return any(re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text) for word in words)

@@ -34,10 +34,9 @@ from src.report.excel_report import generate_report
 
 
 DEEPSEEK_MODEL_ALIASES = {
-    "flash": ("DEEPSEEK_V4_FLASH_MODEL", "deepseek-v4-flash"),
-    "v4-flash": ("DEEPSEEK_V4_FLASH_MODEL", "deepseek-v4-flash"),
-    "pro": ("DEEPSEEK_V4_PRO_MODEL", "deepseek-v4-pro"),
-    "v4-pro": ("DEEPSEEK_V4_PRO_MODEL", "deepseek-v4-pro"),
+    "pro": "deepseek-v4-pro",
+    "v4-pro": "deepseek-v4-pro",
+    "deepseek-v4-pro": "deepseek-v4-pro",
 }
 
 ADDITIONAL_ONEDRIVE_URL = (
@@ -47,12 +46,11 @@ ADDITIONAL_ONEDRIVE_URL = (
 
 
 def resolve_deepseek_model(value: str | None) -> tuple[str, str]:
-    requested = (value or "flash").strip()
+    requested = (value or "pro").strip()
     key = requested.casefold()
-    if key in DEEPSEEK_MODEL_ALIASES:
-        env_name, default_model = DEEPSEEK_MODEL_ALIASES[key]
-        return requested, os.environ.get(env_name, default_model)
-    return "custom", requested
+    if key not in DEEPSEEK_MODEL_ALIASES:
+        raise ValueError("This pipeline is locked to the DeepSeek Pro model (deepseek-v4-pro).")
+    return "pro", DEEPSEEK_MODEL_ALIASES[key]
 
 
 def run_logged_subprocess(
@@ -488,17 +486,24 @@ def run_pipeline(week: int | None = None, year: int | None = None,
         ):
             from classify_fresh_food_relevance import run_relevance_classification
             from extract_single_cached_pdf import write_xlsx
-            from split_brand_product import run_brand_product_split
+            from split_brand_product import (
+                DEFAULT_DEEPSEEK_MODEL as TRANSLATION_DEEPSEEK_MODEL,
+                run_brand_product_split,
+            )
 
             relevant_csv_path, relevant_yes_count, relevant_no_count = run_relevance_classification(
                 input_path=combined_csv_path,
                 output_path=combined_csv_path.with_name("all_suppliers_relevant.csv"),
                 deepseek_model=deepseek_model_id,
             )
+            logger.info(
+                "Product-name translation model: %s (thinking disabled)",
+                TRANSLATION_DEEPSEEK_MODEL,
+            )
             relevant_csv_path, split_count = run_brand_product_split(
                 input_path=relevant_csv_path,
                 workers=25,
-                deepseek_model=deepseek_model_id,
+                deepseek_model=TRANSLATION_DEEPSEEK_MODEL,
             )
             relevant_xlsx_path = write_xlsx(relevant_csv_path)
         logger.info(
@@ -788,11 +793,9 @@ def main():
                         help="Additional shared OneDrive/SharePoint folder URL for the final workbook upload")
     parser.add_argument("--onedrive-login-pause", action="store_true",
                         help="Pause browser upload so you can manually complete Microsoft login/email-code verification")
-    parser.add_argument("--deepseek-model", default="pro",
+    parser.add_argument("--deepseek-model", default="pro", choices=sorted(DEEPSEEK_MODEL_ALIASES),
                         help=(
-                            "DeepSeek model profile or exact model id. Use 'flash' or 'pro'. "
-                            "flash maps to DEEPSEEK_V4_FLASH_MODEL or deepseek-v4-flash; "
-                            "pro maps to DEEPSEEK_V4_PRO_MODEL or deepseek-v4-pro."
+                            "DeepSeek Pro model profile. The pipeline is locked to deepseek-v4-pro."
                         ))
     parser.add_argument("--config", type=str, default="config.yaml",
                         help="Config file path")

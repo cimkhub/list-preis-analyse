@@ -1,7 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
+import math
 import random
+import re
 import threading
 import time
 from pathlib import Path
@@ -24,6 +26,9 @@ _settings = {
     "max_concurrent_requests": 10,
     "min_request_interval_seconds": 0.0,
 }
+QUALITY_RETRY_MODEL = "gemini-3.6-flash"
+QUALITY_RETRY_CONFIDENCE_THRESHOLD = 0.7
+_COMMON_PRODUCT_PUNCTUATION = set("-–—/&.,()[]+%:'\"°")
 _rate_limit_lock = threading.Lock()
 _last_request_started_at = 0.0
 
@@ -99,11 +104,7 @@ def analyze_image_json(
                     prompt,
                     Part.from_bytes(data=img_bytes, mime_type=mime_type),
                 ],
-                config=GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=temperature,
-                    response_mime_type="application/json",
-                ),
+                config=_generation_config(model_name, system_prompt, temperature),
             )
             text = response.text.strip()
 
@@ -189,6 +190,22 @@ def analyze_image_json(
     return None
 
 
+def _generation_config(
+    model_name: str,
+    system_prompt: str,
+    temperature: float | None,
+) -> GenerateContentConfig:
+    config: dict = {
+        "system_instruction": system_prompt,
+        "response_mime_type": "application/json",
+    }
+    # Gemini 3.5 Flash, 3.6 Flash, and later models deprecate sampling parameters.
+    match = re.match(r"gemini-(\d+)\.(\d+)", (model_name or "").casefold())
+    if not match or (int(match.group(1)), int(match.group(2))) < (3, 5):
+        config["temperature"] = temperature
+    return GenerateContentConfig(**config)
+
+
 def _retry_delay_seconds(attempt: int, error: Exception) -> float:
     message = str(error).lower()
     if (
@@ -224,8 +241,16 @@ def extract_products_from_image(
     model_name: str | None = None,
     max_retries: int | None = None,
     temperature: float | None = None,
+    operation: str = "product_extraction",
+    quality_issues: list[str] | None = None,
 ) -> list[dict]:
     prompt = get_extraction_prompt(supplier)
+    if quality_issues:
+        prompt += (
+            "\n\nDies ist eine einmalige Qualitäts-Nachextraktion. "
+            "Extrahiere die komplette Seite neu und prüfe besonders Produktnamen und Preise. "
+            f"Auffälligkeiten im ersten Ergebnis: {', '.join(quality_issues)}."
+        )
     result = analyze_image_json(
         image_path=image_path,
         prompt=prompt,
@@ -233,7 +258,7 @@ def extract_products_from_image(
         model_name=model_name,
         max_retries=max_retries,
         temperature=temperature,
-        operation="product_extraction",
+        operation=operation,
         supplier=supplier,
     )
     if result is None:
@@ -242,6 +267,95 @@ def extract_products_from_image(
     products = result if isinstance(result, list) else [result]
     logger.debug(f"Extracted {len(products)} products from {Path(image_path).name}")
     return products
+
+
+def extraction_quality_issues(raw_items: list[dict] | None) -> list[str]:
+    """Return compact reasons that make one page worth exactly one quality retry."""
+    if raw_items is None:
+        return ["kein Ergebnis"]
+    if not isinstance(raw_items, list):
+        return ["ungültiges Seitenformat"]
+    if not raw_items:
+        return ["keine Produkte erkannt"]
+
+    issues: list[str] = []
+    for index, item in enumerate(raw_items, 1):
+        if not isinstance(item, dict):
+            issues.append(f"Produkt {index}: ungültiges Format")
+            continue
+
+        product_name = str(item.get("product_name") or "").strip()
+        if not product_name:
+            issues.append(f"Produkt {index}: Name fehlt")
+        elif _looks_garbled(product_name):
+            issues.append(f"Produkt {index}: Name unleserlich")
+
+        price = item.get("price")
+        try:
+            numeric_price = float(price)
+        except (TypeError, ValueError):
+            numeric_price = 0.0
+        if not math.isfinite(numeric_price) or numeric_price <= 0:
+            issues.append(f"Produkt {index}: Preis fehlt/ungültig")
+
+        description = item.get("description")
+        if description and _looks_garbled(str(description)):
+            issues.append(f"Produkt {index}: Beschreibung unleserlich")
+
+        confidence = item.get("confidence")
+        if confidence not in (None, ""):
+            try:
+                if float(confidence) < QUALITY_RETRY_CONFIDENCE_THRESHOLD:
+                    issues.append(f"Produkt {index}: geringe Sicherheit")
+            except (TypeError, ValueError):
+                issues.append(f"Produkt {index}: Sicherheit ungültig")
+
+    return issues
+
+
+def _looks_garbled(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text or "\ufffd" in text:
+        return True
+    if any(ord(char) < 32 and not char.isspace() for char in text):
+        return True
+    if re.search(r"([^\w\s])\1{3,}", text, flags=re.UNICODE):
+        return True
+
+    visible = [char for char in text if not char.isspace()]
+    unusual = [
+        char
+        for char in visible
+        if not char.isalnum() and char not in _COMMON_PRODUCT_PUNCTUATION
+    ]
+    return len(unusual) >= 3 and len(unusual) / max(len(visible), 1) > 0.2
+
+
+def _complete_item_count(raw_items: list[dict] | None) -> int:
+    if not isinstance(raw_items, list):
+        return 0
+    count = 0
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("product_name") or "").strip()
+        try:
+            price = float(item.get("price"))
+        except (TypeError, ValueError):
+            price = 0.0
+        if name and not _looks_garbled(name) and math.isfinite(price) and price > 0:
+            count += 1
+    return count
+
+
+def _page_quality_rank(raw_items: list[dict] | None) -> tuple[int, int, int, int]:
+    items = raw_items if isinstance(raw_items, list) else []
+    return (
+        _complete_item_count(items),
+        int(bool(items)),
+        -len(extraction_quality_issues(items)),
+        len(items),
+    )
 
 
 def _raw_items_to_products(
@@ -383,6 +497,66 @@ def extract_products_from_pdf_images(
                 raw_items = []
             page_results[i] = (img_path, raw_items)
 
+    retry_pages = {
+        page_number: (img_path, raw_items, extraction_quality_issues(raw_items))
+        for page_number, (img_path, raw_items) in page_results.items()
+        if extraction_quality_issues(raw_items)
+    }
+    if retry_pages:
+        logger.info(
+            "Retrying %d unclear PDF pages exactly once with %s",
+            len(retry_pages),
+            QUALITY_RETRY_MODEL,
+        )
+        log_event(
+            logger,
+            f"Vision quality retry started for {Path(source_file).name or supplier}",
+            event="vision_quality_retry",
+            status="start",
+            supplier=supplier,
+            source_file=source_file,
+            retry_page_count=len(retry_pages),
+            model_name=QUALITY_RETRY_MODEL,
+        )
+        with ThreadPoolExecutor(max_workers=min(max_concurrent_requests, len(retry_pages))) as executor:
+            retry_future_map = {
+                executor.submit(
+                    extract_products_from_image,
+                    img_path,
+                    supplier,
+                    model_name=QUALITY_RETRY_MODEL,
+                    max_retries=1,
+                    temperature=None,
+                    operation="product_extraction_quality_retry",
+                    quality_issues=issues,
+                ): (page_number, img_path, original_items, issues)
+                for page_number, (img_path, original_items, issues) in retry_pages.items()
+            }
+            for future in as_completed(retry_future_map):
+                page_number, img_path, original_items, original_issues = retry_future_map[future]
+                try:
+                    retry_items = future.result()
+                except Exception as exc:
+                    logger.warning("Gemini quality retry failed on page %d: %s", page_number, exc)
+                    retry_items = []
+
+                use_retry = _page_quality_rank(retry_items) > _page_quality_rank(original_items)
+                selected_items = retry_items if use_retry else original_items
+                page_results[page_number] = (img_path, selected_items)
+                log_event(
+                    logger,
+                    f"Vision quality retry completed for page {page_number}",
+                    event="vision_quality_retry",
+                    status="ok" if use_retry else "kept_original",
+                    supplier=supplier,
+                    source_file=source_file,
+                    source_page=page_number,
+                    model_name=QUALITY_RETRY_MODEL,
+                    original_issues=original_issues,
+                    retry_issues=extraction_quality_issues(retry_items),
+                    selected_result="retry" if use_retry else "original",
+                )
+
     for i, img_path in enumerate(image_paths, 1):
         _, raw_items = page_results.get(i, (img_path, []))
         all_products.extend(
@@ -411,6 +585,7 @@ def extract_products_from_pdf_images(
         supplier=supplier,
         source_file=source_file,
         page_count=len(image_paths),
+        quality_retry_page_count=len(retry_pages),
         product_count=len(all_products),
         duration_ms=round((time.perf_counter() - extraction_started) * 1000, 2),
         model_name=model_name,

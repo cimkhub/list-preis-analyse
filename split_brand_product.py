@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Split product_name into brand and product columns using DeepSeek when needed."""
+"""Split product names and normalize English product wording to German with DeepSeek."""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_MAX_TOKENS = 200
 REASONER_MAX_TOKENS = 800
 CACHE_PATH = ROOT / "embeddings" / "product_matching" / "brand_product_splits.jsonl"
+CACHE_PROMPT_VERSION = "brand-product-de-v2"
 RELEVANT_VALUES = {"yes", "ja", "true", "1", "relevant", "x"}
 _THREAD_LOCAL = local()
 
@@ -42,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, help="Defaults to overwriting --input safely.")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--deepseek-base-url", default=os.environ.get("DEEPSEEK_BASE_URL", DEFAULT_DEEPSEEK_BASE_URL))
-    parser.add_argument("--deepseek-model", default=DEFAULT_DEEPSEEK_MODEL)
+    parser.add_argument("--deepseek-model", default=DEFAULT_DEEPSEEK_MODEL, choices=[DEFAULT_DEEPSEEK_MODEL])
     parser.add_argument("--deepseek-timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
     parser.add_argument("--force-refresh", action="store_true")
@@ -103,6 +104,7 @@ def relevant_row(row: dict[str, str]) -> bool:
 
 def cache_key(row: dict[str, str]) -> str:
     parts = [
+        CACHE_PROMPT_VERSION,
         row.get("product_name", ""),
         row.get("description", ""),
         row.get("category", ""),
@@ -170,13 +172,20 @@ def build_prompt(row: dict[str, str]) -> str:
         "If there is no clear brand, brand must be an empty string.",
         "The product field must contain the actual product without the brand.",
         "Do not invent brands. Do not treat generic product descriptors as brands.",
-        "Keep German product wording, but normalize capitalization to Title Case.",
+        "Return product as one concise final German product name.",
+        "If product wording is fully or partly English, translate only the product words into standard German.",
+        "If it is already German or not clearly English, keep the wording.",
+        "Use description and category only to disambiguate; never invent a missing product type.",
+        "Keep quantities, cuts, quality terms, and other identifying details.",
+        "Do not return language labels, translation flags, explanations, or alternatives.",
+        "Normalize capitalization to Title Case.",
         "",
         "Examples:",
         '{"product_name":"Adelholzener Active O2"} -> {"brand":"Adelholzener","product":"Active O2","confidence":95}',
         '{"product_name":"Spargel Weiß"} -> {"brand":"","product":"Spargel Weiß","confidence":95}',
         '{"product_name":"The Duke Of Berkshire Schweinenacken"} -> {"brand":"The Duke Of Berkshire","product":"Schweinenacken","confidence":95}',
         '{"product_name":"Edeka Foodservice Classic Haltbare Sahne"} -> {"brand":"Edeka Foodservice Classic","product":"Haltbare Sahne","confidence":95}',
+        '{"product_name":"Pork Back","category":"fleisch"} -> {"brand":"","product":"Schweinerücken","confidence":95}',
         "",
         "Return strict JSON only:",
         '{"brand":"","product":"","confidence":0}',
@@ -202,6 +211,7 @@ def call_deepseek(
         },
         json={
             "model": model,
+            "thinking": {"type": "disabled"},
             "messages": [
                 {"role": "system", "content": "You split product names. Return only strict JSON."},
                 {"role": "user", "content": prompt},
@@ -321,6 +331,10 @@ def run_brand_product_split(
         raise RuntimeError("--workers must be at least 1")
     if max_retries < 1:
         raise RuntimeError("--max-retries must be at least 1")
+    if deepseek_model != DEFAULT_DEEPSEEK_MODEL:
+        raise RuntimeError(
+            f"Brand/product split must use {DEFAULT_DEEPSEEK_MODEL}; got {deepseek_model!r}."
+        )
 
     fieldnames, rows = load_rows(input_path)
     cache = read_cache()
