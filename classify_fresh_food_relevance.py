@@ -510,38 +510,57 @@ def normalize_eligibility_analysis(
     if policy_decision == "exclude" and rule_id == "PACKAGE_TOO_SMALL" and package_size_grams is None:
         raise RuntimeError("Unknown package size must be uncertain, not PACKAGE_TOO_SMALL.")
 
+    stage_1_product_group = None
+    product_group_changed = False
     if identity_analysis is not None:
-        expected_group = _canonical_policy_group(identity_analysis.get("policy_group"))
-        if product_group != expected_group:
+        stage_1_product_group = _canonical_policy_group(
+            identity_analysis.get("policy_group")
+        )
+        product_group_changed = product_group != stage_1_product_group
+        # Stage 2 occasionally maps an explicitly excluded product to ``Other``
+        # even though stage 1 kept its factual family (for example pickled
+        # cucumbers: Obst Gemüse -> Other). This is harmless for a negative,
+        # route-less decision and stage 3 still reviews both results. It must
+        # never be allowed to manufacture a different positive route.
+        if product_group_changed and (
+            requirements_met or eligibility_route != "none"
+        ):
             raise RuntimeError(
-                f"Stage 2 changed policy_group from {expected_group!r} to {product_group!r}."
+                "Stage 2 may change policy_group only for exclude/uncertain "
+                f"decisions with route none; got {stage_1_product_group!r} -> "
+                f"{product_group!r} with decision={policy_decision!r} and "
+                f"route={eligibility_route!r}."
             )
-        if expected_group in CORE_FRESH_POLICY_GROUPS:
+        validation_group = product_group if product_group_changed else stage_1_product_group
+        verified_brand_found = brand_proof is not None
+        if required_brand_found is True and not verified_brand_found:
+            raise RuntimeError(
+                "Stage 2 claimed a required brand without verified product evidence."
+            )
+
+        if validation_group in CORE_FRESH_POLICY_GROUPS:
             if eligibility_route not in {"core_fresh", "none"}:
-                raise RuntimeError(f"{expected_group} may only use the core_fresh route.")
+                raise RuntimeError(f"{validation_group} may only use the core_fresh route.")
             if requirements_met and eligibility_route != "core_fresh":
-                raise RuntimeError(f"A positive {expected_group} decision requires core_fresh.")
-        elif expected_group in PACKAGED_EXCEPTION_POLICY_GROUPS:
+                raise RuntimeError(f"A positive {validation_group} decision requires core_fresh.")
+        elif validation_group in PACKAGED_EXCEPTION_POLICY_GROUPS:
             if eligibility_route not in {"packaged_exception", "none"}:
                 raise RuntimeError(
-                    f"{expected_group} may only use the packaged_exception route."
+                    f"{validation_group} may only use the packaged_exception route."
                 )
-            verified_brand_found = brand_proof is not None
             if verified_brand_found and eligibility_route != "packaged_exception":
                 raise RuntimeError(
-                    f"{expected_group} with verified brand evidence must use packaged_exception."
+                    f"{validation_group} with verified brand evidence must use packaged_exception."
                 )
-            if required_brand_found is True and not verified_brand_found:
-                raise RuntimeError("Stage 2 claimed a required brand without verified product evidence.")
             if required_brand_found is False and verified_brand_found:
                 raise RuntimeError("Stage 2 rejected a brand that is verified by product evidence.")
             if requirements_met and not verified_brand_found:
                 raise RuntimeError(
-                    f"A positive {expected_group} decision requires a verified approved brand."
+                    f"A positive {validation_group} decision requires a verified approved brand."
                 )
             if requirements_met and eligibility_route != "packaged_exception":
                 raise RuntimeError(
-                    f"A positive {expected_group} decision requires packaged_exception."
+                    f"A positive {validation_group} decision requires packaged_exception."
                 )
         else:
             if eligibility_route != "none" or requirements_met:
@@ -565,6 +584,8 @@ def normalize_eligibility_analysis(
         "evidence": _normalize_evidence(value.get("evidence")),
         "verified_brand_found": brand_proof is not None,
         "verified_brand": (brand_proof or {}).get("brand"),
+        "stage_1_product_group": stage_1_product_group,
+        "product_group_changed": product_group_changed,
     }
 
 
@@ -881,6 +902,7 @@ def build_eligibility_prompt(
             "STAGE 2 OF 3: POLICY DECISION",
             "Apply policy to stage-1 facts. Return include, exclude, or uncertain; do not issue the final Ja/Nein review.",
             "Unknown facts never justify exclude by themselves. When required evidence is genuinely missing, use uncertain and review_needed=true.",
+            "Keep stage 1's factual product_group unless the source evidence proves it wrong. Do not switch to Other merely because processing excludes the product: pickled cucumbers remain Obst Gemüse with route none. A group correction is allowed only for exclude/uncertain with route none and will be audited by stage 3.",
             "",
             "Route core_fresh:",
             "- Only policy_group Fleisch, Fisch, or Obst Gemüse may use this route.",

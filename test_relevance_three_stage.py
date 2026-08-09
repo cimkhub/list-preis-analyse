@@ -250,6 +250,87 @@ def test_classify_row_runs_all_three_pro_model_stages_in_order(monkeypatch):
     assert trace["stage_3_final"]["rule_id"] == "ADDITIONAL_PRODUCT"
 
 
+def test_pickled_cucumber_stage_group_correction_completes_all_three_stages(
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    def fake_call_deepseek(**kwargs):
+        prompt = kwargs["prompt"]
+        calls.append(prompt.splitlines()[0])
+        if prompt.startswith("STAGE 1 OF 3"):
+            payload = {
+                "product_type": "pickled sandwich cucumbers",
+                "product_family": "obst_gemuese",
+                "policy_group": "Obst Gemüse",
+                "temperature_state": "ambient",
+                "processing_state": "pickled",
+                "source_brand": "Hengstenberg",
+                "brand_evidence": "Hengstenberg Sandwich-Gurken",
+                "brand_evidence_source": "product_name",
+                "exclusion_signal": "explicit_exclusion",
+                "exclusion_reason": "pickled preserved product",
+                "confidence": 0.98,
+                "evidence": ["Sandwich-Gurken"],
+            }
+        elif prompt.startswith("STAGE 2 OF 3"):
+            payload = {
+                "policy_decision": "exclude",
+                "eligibility_route": "none",
+                "product_group": "Other",
+                "required_brand_found": None,
+                "package_size_grams": None,
+                "rule_id": "EXPLICIT_EXCLUSION",
+                "reason": "Pickled cucumbers are preserved",
+                "confidence": 0.99,
+                "review_needed": False,
+                "evidence": ["processing_state pickled"],
+            }
+        elif prompt.startswith("STAGE 3 OF 3"):
+            payload = {
+                "decision": "Nein",
+                "reason": "Pickled preserved cucumber product",
+                "rule_id": "EXPLICIT_EXCLUSION",
+                "confidence": 0.99,
+                "review_needed": False,
+                "overrode_stage": "none",
+                "evidence": ["Sandwich-Gurken", "pickled"],
+            }
+        else:  # pragma: no cover - protects the stage contract in this regression.
+            raise AssertionError(prompt[:80])
+        return api_response(json.dumps(payload))
+
+    monkeypatch.setattr(relevance, "call_deepseek", fake_call_deepseek)
+    index, label, reason, trace = relevance.classify_row_with_trace(
+        158,
+        {
+            "supplier": "metro",
+            "category": "obst_gemuese",
+            "product_name": "Hengstenberg Sandwich-Gurken",
+            "description": "eingelegt",
+        },
+        api_key="unused",
+        model="deepseek-v4-pro",
+        base_url="https://unused.invalid",
+        timeout_seconds=1,
+        max_retries=1,
+    )
+
+    assert calls == [
+        "STAGE 1 OF 3: FACT EXTRACTION",
+        "STAGE 2 OF 3: POLICY DECISION",
+        "STAGE 3 OF 3: INDEPENDENT FINAL REVIEW",
+    ]
+    assert (index, label, reason) == (
+        158,
+        "Nein",
+        "Pickled preserved cucumber product",
+    )
+    assert trace["stage_2_policy"]["stage_1_product_group"] == "Obst Gemüse"
+    assert trace["stage_2_policy"]["product_group"] == "Other"
+    assert trace["stage_2_policy"]["product_group_changed"] is True
+
+
 def test_final_reviewer_can_override_both_prior_stages_when_declared():
     facts = relevance.normalize_identity_analysis(
         json.dumps(

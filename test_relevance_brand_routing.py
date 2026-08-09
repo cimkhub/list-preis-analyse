@@ -261,6 +261,48 @@ def test_core_fresh_groups_do_not_require_a_brand(group):
     assert parsed["eligibility_route"] == "core_fresh"
 
 
+def test_pickled_cucumbers_group_correction_is_nonfatal_for_negative_route():
+    facts = identity("Obst Gemüse", exclusion_signal="explicit_exclusion")
+    facts["processing_state"] = "pickled"
+    policy = relevance.normalize_eligibility_analysis(
+        policy_payload(
+            "Other",
+            decision="exclude",
+            route="none",
+            required_brand_found=None,
+        ),
+        identity_analysis=facts,
+        brand_proof=None,
+    )
+
+    assert policy["policy_decision"] == "exclude"
+    assert policy["eligibility_route"] == "none"
+    assert policy["product_group"] == "Other"
+    assert policy["stage_1_product_group"] == "Obst Gemüse"
+    assert policy["product_group_changed"] is True
+    final = relevance.normalize_final_review(
+        final_payload("Nein"),
+        facts,
+        policy,
+        brand_proof=None,
+    )
+    assert final["decision"] == "Nein"
+
+
+def test_stage_2_group_change_cannot_create_a_positive_route():
+    with pytest.raises(RuntimeError, match="may change policy_group only"):
+        relevance.normalize_eligibility_analysis(
+            policy_payload(
+                "Fleisch",
+                decision="include",
+                route="core_fresh",
+                required_brand_found=None,
+            ),
+            identity_analysis=identity("Other"),
+            brand_proof=None,
+        )
+
+
 def test_final_reviewer_cannot_bypass_brand_or_other_contract():
     milk_identity = identity("Milk")
     milk_policy = relevance.normalize_eligibility_analysis(
