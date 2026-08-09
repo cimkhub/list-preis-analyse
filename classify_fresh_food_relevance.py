@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -13,7 +15,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
-from threading import local
+from threading import Lock, local
 from typing import Any, Callable
 
 import requests
@@ -32,6 +34,19 @@ except ImportError:  # pragma: no cover - dependency is declared, fallback keeps
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+def _calculate_relevance_implementation_digest() -> str:
+    digest = hashlib.sha256()
+    for path in (Path(__file__).resolve(), ROOT / "src" / "models.py"):
+        digest.update(str(path.name).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+RELEVANCE_IMPLEMENTATION_DIGEST = _calculate_relevance_implementation_digest()
 DEFAULT_INPUT = ROOT / "parsed" / "KW18_2026" / "all_suppliers.csv"
 DEFAULT_WORKERS = 25
 DEFAULT_TIMEOUT_SECONDS = 120
@@ -40,7 +55,8 @@ DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
 DEFAULT_MAX_TOKENS = 1024
 REASONER_MAX_TOKENS = 4096
-TRACE_SCHEMA_VERSION = 3
+TRACE_SCHEMA_VERSION = 4
+CHECKPOINT_SCHEMA_VERSION = 2
 AUDIT_OUTPUT_FIELDS = [
     "relevance_decision",
     "relevance_reason",
@@ -50,11 +66,15 @@ AUDIT_OUTPUT_FIELDS = [
     "relevance_overrode_stage",
     "relevance_evidence",
     "relevance_policy_group",
+    "relevance_stage_1_policy_group",
     "relevance_policy_decision",
     "relevance_route",
     "relevance_brand",
     "relevance_brand_source",
     "relevance_brand_evidence",
+    "relevance_processing_status",
+    "relevance_contract_issues",
+    "relevance_stage_errors",
     "relevance_trace_schema_version",
 ]
 PRODUCT_EVIDENCE_FIELDS = (
@@ -124,6 +144,148 @@ FINAL_STAGE_SYSTEM_PROMPT = (
     "Re-check the source row and both prior stages, correct unsupported conclusions when "
     "necessary, and return exactly one valid JSON object without Markdown."
 )
+
+
+class RelevanceBatchTechnicalError(RuntimeError):
+    """Raised after audit artifacts are written; checkpoint resume is best-effort."""
+
+    def __init__(
+        self,
+        *,
+        error_count: int,
+        output_path: Path,
+        trace_output_path: Path,
+        checkpoint_path: Path,
+        checkpoint_available: bool,
+        yes_count: int,
+        no_count: int,
+    ) -> None:
+        resume_detail = (
+            f"Re-run the same command to resume from {checkpoint_path}."
+            if checkpoint_available
+            else "Checkpoint writing was unavailable; a rerun will reprocess rows."
+        )
+        super().__init__(
+            f"Relevance classification has {error_count} technical row error(s). "
+            f"Audit artifacts were saved to {output_path} and {trace_output_path}. "
+            f"{resume_detail}"
+        )
+        self.error_count = error_count
+        self.output_path = output_path
+        self.trace_output_path = trace_output_path
+        self.checkpoint_path = checkpoint_path
+        self.checkpoint_available = checkpoint_available
+        self.yes_count = yes_count
+        self.no_count = no_count
+
+
+class RelevanceCircuitOpen(RuntimeError):
+    """Signals that the shared DeepSeek circuit has stopped further paid calls."""
+
+
+class RelevanceCircuitBreaker:
+    def __init__(self, failure_threshold: int) -> None:
+        self.failure_threshold = max(1, failure_threshold)
+        self._lock = Lock()
+        self._consecutive_transport_failures = 0
+        self._open_reason: str | None = None
+
+    def raise_if_open(self) -> None:
+        with self._lock:
+            reason = self._open_reason
+        if reason is not None:
+            raise RelevanceCircuitOpen(
+                f"DeepSeek circuit is open for this run: {reason}"
+            )
+
+    def record_success(self) -> None:
+        with self._lock:
+            if self._open_reason is None:
+                self._consecutive_transport_failures = 0
+
+    def record_transport_failure(self, exc: Exception) -> bool:
+        permanent = _is_permanent_api_failure(exc)
+        with self._lock:
+            self._consecutive_transport_failures += 1
+            if permanent or (
+                self._consecutive_transport_failures >= self.failure_threshold
+            ):
+                self._open_reason = re.sub(r"\s+", " ", str(exc)).strip()[:500]
+            return self._open_reason is not None
+
+
+def _exception_chain(exc: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def _is_transport_failure(exc: BaseException) -> bool:
+    for item in _exception_chain(exc):
+        if isinstance(
+            item,
+            (RelevanceCircuitOpen, requests.RequestException, TimeoutError),
+        ):
+            return True
+        if "deepseek api error" in str(item).casefold():
+            return True
+    return False
+
+
+def _is_permanent_api_failure(exc: BaseException) -> bool:
+    for item in _exception_chain(exc):
+        if isinstance(item, requests.HTTPError) and item.response is not None:
+            status = item.response.status_code
+            if 400 <= status < 500 and status not in {408, 429}:
+                return True
+        message = str(item).casefold()
+        if any(
+            marker in message
+            for marker in (
+                "invalid api key",
+                "authentication failed",
+                "unauthorized",
+                "forbidden",
+            )
+        ):
+            return True
+    return False
+
+
+def _contract_issue(
+    code: str,
+    message: str,
+    *,
+    stage: str,
+    fields: tuple[str, ...] = (),
+    severity: str = "warning",
+    kind: str = "semantic_contract",
+) -> dict[str, Any]:
+    """Return a stable, machine-readable non-fatal model-contract issue."""
+    return {
+        "code": code,
+        "kind": kind,
+        "severity": severity,
+        "stage": stage,
+        "message": message,
+        "fields": list(fields),
+    }
+
+
+def _stage_error(stage: str, exc: Exception, attempts: int) -> dict[str, Any]:
+    """Sanitize an exhausted stage error for traces and checkpoints."""
+    message = re.sub(r"\s+", " ", str(exc)).strip()
+    return {
+        "stage": stage,
+        "type": type(exc).__name__,
+        "message": message[:1000],
+        "attempts": attempts,
+    }
 
 
 def require_deepseek_pro_model(model: str) -> None:
@@ -396,9 +558,18 @@ def _normalize_rule_id(value: object) -> str:
 def normalize_identity_analysis(raw_text: str) -> dict[str, Any]:
     """Normalize factual stage-1 observations without applying relevance policy."""
     value = extract_json_object(raw_text)
+    contract_issues: list[dict[str, Any]] = []
     product_type = str(value.get("product_type") or "").strip()
     if not product_type:
-        raise RuntimeError("Identity analysis is missing product_type.")
+        product_type = "unknown product"
+        contract_issues.append(
+            _contract_issue(
+                "MISSING_PRODUCT_TYPE",
+                "Stage 1 omitted product_type; normalized to unknown product.",
+                stage="stage_1",
+                fields=("product_type",),
+            )
+        )
 
     product_family = _required_enum(
         value.get("product_family"),
@@ -424,7 +595,17 @@ def normalize_identity_analysis(raw_text: str) -> dict[str, Any]:
     source_brand = _optional_text(value.get("source_brand"))
     brand_evidence = _optional_text(value.get("brand_evidence"))
     if source_brand and (not brand_evidence or brand_evidence_source == "unknown"):
-        raise RuntimeError("A source_brand requires explicit brand_evidence and its source.")
+        contract_issues.append(
+            _contract_issue(
+                "UNSUPPORTED_STAGE_1_BRAND",
+                "Stage 1 supplied a brand without direct evidence; the brand claim was removed.",
+                stage="stage_1",
+                fields=("source_brand", "brand_evidence", "brand_evidence_source"),
+            )
+        )
+        source_brand = None
+        brand_evidence = None
+        brand_evidence_source = "unknown"
 
     exclusion_signal = _required_enum(
         value.get("exclusion_signal"),
@@ -433,7 +614,15 @@ def normalize_identity_analysis(raw_text: str) -> dict[str, Any]:
     )
     exclusion_reason = str(value.get("exclusion_reason") or "").strip()
     if exclusion_signal == "explicit_exclusion" and not exclusion_reason:
-        raise RuntimeError("An explicit exclusion signal requires exclusion_reason.")
+        contract_issues.append(
+            _contract_issue(
+                "UNSUPPORTED_EXCLUSION_SIGNAL",
+                "Stage 1 supplied an explicit exclusion without a reason; normalized to uncertain.",
+                stage="stage_1",
+                fields=("exclusion_signal", "exclusion_reason"),
+            )
+        )
+        exclusion_signal = "uncertain"
     hard_exclusion = exclusion_signal == "explicit_exclusion"
 
     return {
@@ -450,6 +639,7 @@ def normalize_identity_analysis(raw_text: str) -> dict[str, Any]:
         "exclusion_reason": _canonical_reason(_short_reason(exclusion_reason)) if hard_exclusion else "",
         "confidence": _required_confidence(value.get("confidence")),
         "evidence": _normalize_evidence(value.get("evidence")),
+        "contract_issues": contract_issues,
     }
 
 
@@ -458,57 +648,56 @@ def normalize_eligibility_analysis(
     identity_analysis: dict[str, Any] | None = None,
     brand_proof: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Normalize stage-2 policy and expose the previous compatibility keys."""
+    """Normalize stage-2 policy without turning semantic disagreement into failure.
+
+    Invalid JSON and unusable field types still trigger a model retry. Policy conflicts
+    are retained as structured contract issues. Unsafe positive results are downgraded
+    to ``uncertain`` so the independent final stage can adjudicate them.
+    """
     value = extract_json_object(raw_text)
-    policy_decision = _required_enum(
+    contract_issues: list[dict[str, Any]] = []
+    reported_policy_decision = _required_enum(
         value.get("policy_decision"),
         "policy_decision",
         frozenset({"include", "exclude", "uncertain"}),
     )
-    eligibility_route = str(value.get("eligibility_route") or "").strip().casefold()
-    if eligibility_route not in {"core_fresh", "packaged_exception", "none"}:
-        raise RuntimeError(f"Unknown eligibility_route: {eligibility_route!r}")
-
-    requirements_met = policy_decision == "include"
-    if requirements_met and eligibility_route == "none":
-        raise RuntimeError("Eligibility requirements cannot be met when route is none.")
+    reported_eligibility_route = str(
+        value.get("eligibility_route") or ""
+    ).strip().casefold()
+    if reported_eligibility_route not in {"core_fresh", "packaged_exception", "none"}:
+        raise RuntimeError(f"Unknown eligibility_route: {reported_eligibility_route!r}")
 
     review_needed = _required_bool(value.get("review_needed"), "review_needed")
-    if policy_decision == "uncertain" and not review_needed:
-        raise RuntimeError("An uncertain policy decision must set review_needed=true.")
-
     product_group_raw = str(value.get("product_group") or "").strip()
-    if requirements_met and not product_group_raw:
-        raise RuntimeError("Eligibility analysis is missing product_group for a positive route.")
-    product_group = _canonical_policy_group(product_group_raw or "Other")
+    reported_product_group = _canonical_policy_group(product_group_raw or "Other")
 
-    required_brand_found = value.get("required_brand_found")
-    if required_brand_found is not None:
-        required_brand_found = _required_bool(required_brand_found, "required_brand_found")
+    reported_required_brand_found = value.get("required_brand_found")
+    if reported_required_brand_found is not None:
+        reported_required_brand_found = _required_bool(
+            reported_required_brand_found,
+            "required_brand_found",
+        )
 
     package_size_grams = value.get("package_size_grams")
     if package_size_grams is not None:
-        package_size_grams = _parse_float(package_size_grams)
-        if package_size_grams is None or package_size_grams < 0:
-            raise RuntimeError("package_size_grams must be a non-negative number or null.")
-
-    if eligibility_route == "packaged_exception" and requirements_met and required_brand_found is not True:
-        raise RuntimeError("A packaged exception requires a confirmed required brand.")
-
-    group_key = product_group.casefold()
-    size_limited_group = any(term in group_key for term in {"cheese", "käse", "kaese", "sausage", "wurst"})
-    if eligibility_route == "packaged_exception" and requirements_met and size_limited_group:
-        if package_size_grams is None or package_size_grams < 500:
-            raise RuntimeError("Cheese and sausage exceptions require at least 500 grams.")
+        parsed_package_size = _parse_float(package_size_grams)
+        if parsed_package_size is None or parsed_package_size < 0:
+            contract_issues.append(
+                _contract_issue(
+                    "INVALID_PACKAGE_SIZE",
+                    "Stage 2 supplied an invalid package size; normalized to unknown.",
+                    stage="stage_2",
+                    fields=("package_size_grams",),
+                )
+            )
+            package_size_grams = None
+        else:
+            package_size_grams = parsed_package_size
 
     rule_id = _normalize_rule_id(value.get("rule_id"))
     reason = str(value.get("reason") or "").strip()
     if not reason:
         raise RuntimeError("Eligibility analysis is missing reason.")
-    if policy_decision == "exclude" and rule_id == "BRAND_MISSING" and required_brand_found is None:
-        raise RuntimeError("Unknown brand evidence must be uncertain, not BRAND_MISSING.")
-    if policy_decision == "exclude" and rule_id == "PACKAGE_TOO_SMALL" and package_size_grams is None:
-        raise RuntimeError("Unknown package size must be uncertain, not PACKAGE_TOO_SMALL.")
 
     stage_1_product_group = None
     product_group_changed = False
@@ -516,58 +705,198 @@ def normalize_eligibility_analysis(
         stage_1_product_group = _canonical_policy_group(
             identity_analysis.get("policy_group")
         )
-        product_group_changed = product_group != stage_1_product_group
-        # Stage 2 occasionally maps an explicitly excluded product to ``Other``
-        # even though stage 1 kept its factual family (for example pickled
-        # cucumbers: Obst Gemüse -> Other). This is harmless for a negative,
-        # route-less decision and stage 3 still reviews both results. It must
-        # never be allowed to manufacture a different positive route.
-        if product_group_changed and (
-            requirements_met or eligibility_route != "none"
-        ):
-            raise RuntimeError(
-                "Stage 2 may change policy_group only for exclude/uncertain "
-                f"decisions with route none; got {stage_1_product_group!r} -> "
-                f"{product_group!r} with decision={policy_decision!r} and "
-                f"route={eligibility_route!r}."
+        product_group_changed = reported_product_group != stage_1_product_group
+        if product_group_changed:
+            contract_issues.append(
+                _contract_issue(
+                    "STAGE_2_PRODUCT_GROUP_CHANGED",
+                    "Stage 2 changed the factual product group; the stage-1 group remains authoritative.",
+                    stage="stage_2",
+                    fields=("product_group",),
+                )
             )
-        validation_group = product_group if product_group_changed else stage_1_product_group
-        verified_brand_found = brand_proof is not None
-        if required_brand_found is True and not verified_brand_found:
-            raise RuntimeError(
-                "Stage 2 claimed a required brand without verified product evidence."
-            )
+    product_group = stage_1_product_group or reported_product_group
+    verified_brand_found = brand_proof is not None
 
-        if validation_group in CORE_FRESH_POLICY_GROUPS:
-            if eligibility_route not in {"core_fresh", "none"}:
-                raise RuntimeError(f"{validation_group} may only use the core_fresh route.")
-            if requirements_met and eligibility_route != "core_fresh":
-                raise RuntimeError(f"A positive {validation_group} decision requires core_fresh.")
-        elif validation_group in PACKAGED_EXCEPTION_POLICY_GROUPS:
-            if eligibility_route not in {"packaged_exception", "none"}:
-                raise RuntimeError(
-                    f"{validation_group} may only use the packaged_exception route."
+    required_brand_found = reported_required_brand_found
+    if required_brand_found is True and not verified_brand_found:
+        contract_issues.append(
+            _contract_issue(
+                "UNVERIFIED_BRAND_CLAIM",
+                "Stage 2 claimed an approved brand without verified product evidence; normalized to unknown.",
+                stage="stage_2",
+                fields=("required_brand_found",),
+            )
+        )
+        required_brand_found = None
+    elif verified_brand_found and required_brand_found is not True:
+        if required_brand_found is False:
+            contract_issues.append(
+                _contract_issue(
+                    "VERIFIED_BRAND_DISAGREEMENT",
+                    "Stage 2 rejected a brand that is verified by product evidence; the verified proof remains authoritative.",
+                    stage="stage_2",
+                    fields=("required_brand_found",),
                 )
-            if verified_brand_found and eligibility_route != "packaged_exception":
-                raise RuntimeError(
-                    f"{validation_group} with verified brand evidence must use packaged_exception."
+            )
+        required_brand_found = True
+
+    policy_decision = reported_policy_decision
+    eligibility_route = reported_eligibility_route
+    if policy_decision == "uncertain" and not review_needed:
+        review_needed = True
+        contract_issues.append(
+            _contract_issue(
+                "UNCERTAIN_WITHOUT_REVIEW",
+                "Stage 2 marked the result uncertain without review; review was enabled.",
+                stage="stage_2",
+                fields=("policy_decision", "review_needed"),
+            )
+        )
+
+    if policy_decision == "exclude" and rule_id == "BRAND_MISSING" and required_brand_found is None:
+        policy_decision = "uncertain"
+        rule_id = "INSUFFICIENT_EVIDENCE"
+        review_needed = True
+        contract_issues.append(
+            _contract_issue(
+                "UNKNOWN_BRAND_NOT_EXCLUSION",
+                "Unknown brand evidence cannot prove exclusion; normalized to uncertain.",
+                stage="stage_2",
+                fields=("policy_decision", "required_brand_found", "rule_id"),
+            )
+        )
+    if policy_decision == "exclude" and rule_id == "PACKAGE_TOO_SMALL" and package_size_grams is None:
+        policy_decision = "uncertain"
+        rule_id = "INSUFFICIENT_EVIDENCE"
+        review_needed = True
+        contract_issues.append(
+            _contract_issue(
+                "UNKNOWN_SIZE_NOT_EXCLUSION",
+                "Unknown package size cannot prove exclusion; normalized to uncertain.",
+                stage="stage_2",
+                fields=("policy_decision", "package_size_grams", "rule_id"),
+            )
+        )
+
+    # A negative or uncertain result never needs a positive route. This is the
+    # exact contract that protects rows such as Metro Chef frozen mushrooms.
+    if policy_decision != "include" and eligibility_route != "none":
+        contract_issues.append(
+            _contract_issue(
+                "NON_POSITIVE_ROUTE_REMOVED",
+                "A non-positive stage-2 result supplied a route; normalized to none.",
+                stage="stage_2",
+                fields=("policy_decision", "eligibility_route"),
+            )
+        )
+        eligibility_route = "none"
+
+    brand_route_eligible = product_group not in {"Cheese", "Sausage"} or (
+        package_size_grams is not None and package_size_grams >= 500
+    )
+    if (
+        policy_decision != "include"
+        and product_group in PACKAGED_EXCEPTION_POLICY_GROUPS
+        and verified_brand_found
+        and brand_route_eligible
+        and (
+            identity_analysis is None
+            or identity_analysis.get("exclusion_signal") != "explicit_exclusion"
+        )
+    ):
+        contract_issues.append(
+            _contract_issue(
+                "VERIFIED_BRAND_ROUTE_MISMATCH",
+                "An eligible packaged group has verified brand evidence but Stage 2 returned no positive route; Stage 3 must adjudicate.",
+                stage="stage_2",
+                fields=(
+                    "policy_decision",
+                    "eligibility_route",
+                    "required_brand_found",
+                ),
+            )
+        )
+        review_needed = True
+
+    blocking_positive_issues: list[dict[str, Any]] = []
+    if policy_decision == "include":
+        if product_group in CORE_FRESH_POLICY_GROUPS:
+            if eligibility_route != "core_fresh":
+                blocking_positive_issues.append(
+                    _contract_issue(
+                        "CORE_FRESH_ROUTE_MISMATCH",
+                        f"A positive {product_group} result requires core_fresh.",
+                        stage="stage_2",
+                        fields=("product_group", "eligibility_route"),
+                        severity="blocking",
+                    )
                 )
-            if required_brand_found is False and verified_brand_found:
-                raise RuntimeError("Stage 2 rejected a brand that is verified by product evidence.")
-            if requirements_met and not verified_brand_found:
-                raise RuntimeError(
-                    f"A positive {validation_group} decision requires a verified approved brand."
+        elif product_group in PACKAGED_EXCEPTION_POLICY_GROUPS:
+            if eligibility_route != "packaged_exception":
+                blocking_positive_issues.append(
+                    _contract_issue(
+                        "PACKAGED_ROUTE_MISMATCH",
+                        f"A positive {product_group} result requires packaged_exception.",
+                        stage="stage_2",
+                        fields=("product_group", "eligibility_route"),
+                        severity="blocking",
+                    )
                 )
-            if requirements_met and eligibility_route != "packaged_exception":
-                raise RuntimeError(
-                    f"A positive {validation_group} decision requires packaged_exception."
+            if not verified_brand_found:
+                blocking_positive_issues.append(
+                    _contract_issue(
+                        "PACKAGED_BRAND_UNVERIFIED",
+                        f"A positive {product_group} result requires verified approved brand evidence.",
+                        stage="stage_2",
+                        fields=("product_group", "required_brand_found"),
+                        severity="blocking",
+                    )
+                )
+            if product_group in {"Cheese", "Sausage"} and (
+                package_size_grams is None or package_size_grams < 500
+            ):
+                blocking_positive_issues.append(
+                    _contract_issue(
+                        "PACKAGE_SIZE_REQUIREMENT_UNPROVEN",
+                        f"A positive {product_group} result requires a proven package size of at least 500 grams.",
+                        stage="stage_2",
+                        fields=("product_group", "package_size_grams"),
+                        severity="blocking",
+                    )
                 )
         else:
-            if eligibility_route != "none" or requirements_met:
-                raise RuntimeError("Other products cannot use a positive relevance route.")
+            blocking_positive_issues.append(
+                _contract_issue(
+                    "OTHER_CANNOT_BE_POSITIVE",
+                    "Policy group Other cannot use a positive relevance route.",
+                    stage="stage_2",
+                    fields=("product_group", "policy_decision"),
+                    severity="blocking",
+                )
+            )
 
-        if identity_analysis.get("exclusion_signal") == "explicit_exclusion" and requirements_met:
-            raise RuntimeError("Stage 2 cannot include a product with an explicit exclusion signal.")
+        if identity_analysis is not None and (
+            identity_analysis.get("exclusion_signal") == "explicit_exclusion"
+        ):
+            blocking_positive_issues.append(
+                _contract_issue(
+                    "EXCLUSION_SIGNAL_CONFLICT",
+                    "Stage 2 included a product despite an explicit stage-1 exclusion signal.",
+                    stage="stage_2",
+                    fields=("policy_decision", "exclusion_signal"),
+                    severity="warning",
+                )
+            )
+
+    if blocking_positive_issues:
+        contract_issues.extend(blocking_positive_issues)
+        policy_decision = "uncertain"
+        eligibility_route = "none"
+        rule_id = "POLICY_CONTRACT_CONFLICT"
+        review_needed = True
+
+    requirements_met = policy_decision == "include"
 
     return {
         "policy_decision": policy_decision,
@@ -586,6 +915,12 @@ def normalize_eligibility_analysis(
         "verified_brand": (brand_proof or {}).get("brand"),
         "stage_1_product_group": stage_1_product_group,
         "product_group_changed": product_group_changed,
+        "reported_policy_decision": reported_policy_decision,
+        "reported_eligibility_route": reported_eligibility_route,
+        "reported_product_group": reported_product_group,
+        "reported_required_brand_found": reported_required_brand_found,
+        "contract_issues": contract_issues,
+        "normalization_applied": bool(contract_issues),
     }
 
 
@@ -902,7 +1237,7 @@ def build_eligibility_prompt(
             "STAGE 2 OF 3: POLICY DECISION",
             "Apply policy to stage-1 facts. Return include, exclude, or uncertain; do not issue the final Ja/Nein review.",
             "Unknown facts never justify exclude by themselves. When required evidence is genuinely missing, use uncertain and review_needed=true.",
-            "Keep stage 1's factual product_group unless the source evidence proves it wrong. Do not switch to Other merely because processing excludes the product: pickled cucumbers remain Obst Gemüse with route none. A group correction is allowed only for exclude/uncertain with route none and will be audited by stage 3.",
+            "Keep stage 1's factual product_group. Stage 2 applies policy but does not redefine product identity. Do not switch to Other merely because processing excludes the product: pickled cucumbers remain Obst Gemüse with route none. If the group appears wrong, keep it and explain the disagreement for stage 3.",
             "",
             "Route core_fresh:",
             "- Only policy_group Fleisch, Fisch, or Obst Gemüse may use this route.",
@@ -963,11 +1298,11 @@ def build_final_decision_prompt(
             "- 'Ready to eat' ripe whole fruit is not convenience evidence.",
             "- Unknown alone is not evidence for exclusion. Set review_needed=true when material ambiguity remains.",
             "- Core families are positive when no explicit contradiction exists. The additional-product route and its brand/size requirements remain valid.",
-            "- You may correct prior analysis, but you may never bypass the route contract: additional-product groups require packaged_exception plus verified brand evidence; Other is never positive.",
+            "- You may correct stage 1's factual group and stage 2's decision or route. Put the corrected effective group in final_policy_group and declare the corresponding override. If source evidence satisfies an additional-product group and verified brand proof is present, a prior route=none is not binding: return Ja, declare a stage_2 override, and explain the correction. Additional-product groups still require verified brand evidence; Other is never positive.",
             "- Use review_needed=true for low confidence, conflicting evidence, or any override.",
             "",
             "Return exactly one JSON object with this schema:",
-            '{"decision":"Ja|Nein","reason":"concise final reason","rule_id":"stable uppercase rule id","confidence":0.0,"review_needed":false,"overrode_stage":"none|stage_1|stage_2|both","evidence":["specific row or stage evidence"]}',
+            '{"decision":"Ja|Nein","final_policy_group":"Fleisch|Fisch|Obst Gemüse|Oil|Cream|Quark|Cheese|Sausage|Frozen vegetables|French fries|Milk|Other","reason":"concise final reason","rule_id":"stable uppercase rule id","confidence":0.0,"review_needed":false,"overrode_stage":"none|stage_1|stage_2|both","evidence":["specific row or stage evidence"]}',
             "overrode_stage must name each decisive prior stage contradicted by the final decision. Confidence must be 0..1.",
             "Do not add Markdown, commentary, or another object.",
             "",
@@ -1039,21 +1374,52 @@ def call_model_stage(
     prompt: str,
     system_prompt: str,
     parser: Callable[[str], Any],
+    circuit_breaker: RelevanceCircuitBreaker | None = None,
 ) -> Any:
-    """Call and retry one stage without repeating already successful stages."""
+    """Call and retry one stage without repeating already successful stages.
+
+    A rejected response is fed back to the model on the next attempt so retries
+    repair the actual schema problem instead of sending an identical request.
+    """
     require_deepseek_pro_model(model)
+    previous_error = ""
     for attempt in range(1, max_retries + 1):
+        if circuit_breaker is not None:
+            circuit_breaker.raise_if_open()
         try:
+            attempt_prompt = prompt
+            if previous_error:
+                attempt_prompt = "\n".join(
+                    [
+                        prompt,
+                        "",
+                        "CORRECTION REQUIRED FOR THIS RETRY:",
+                        f"The previous response was rejected: {previous_error[:600]}",
+                        "Return one complete corrected JSON object matching the requested schema.",
+                    ]
+                )
             response_json = call_deepseek(
                 api_key=api_key,
                 model=model,
                 base_url=base_url,
                 timeout_seconds=timeout_seconds,
-                prompt=prompt,
+                prompt=attempt_prompt,
                 system_prompt=system_prompt,
             )
-            return parser(extract_response_text(response_json))
+            parsed = parser(extract_response_text(response_json))
+            if circuit_breaker is not None:
+                circuit_breaker.record_success()
+            return parsed
         except Exception as exc:
+            previous_error = re.sub(r"\s+", " ", str(exc)).strip()
+            if (
+                circuit_breaker is not None
+                and _is_transport_failure(exc)
+                and circuit_breaker.record_transport_failure(exc)
+            ):
+                raise RelevanceCircuitOpen(
+                    f"DeepSeek circuit opened after transport/API failures: {previous_error[:500]}"
+                ) from exc
             if attempt >= max_retries:
                 raise RuntimeError(
                     f"DeepSeek {stage_name} failed for row {row_number} ({product_name}): {exc}"
@@ -1067,19 +1433,34 @@ def _expected_override_stage(
     decision: str,
     identity_analysis: dict[str, Any],
     eligibility_analysis: dict[str, Any],
+    final_policy_group: str | None = None,
 ) -> str:
-    contradicted: list[str] = []
+    contradicted: set[str] = set()
+    identity_policy_group = _canonical_policy_group(
+        identity_analysis.get("policy_group")
+    )
+    effective_policy_group = _canonical_policy_group(
+        final_policy_group or identity_policy_group
+    )
+    if effective_policy_group != identity_policy_group:
+        contradicted.add("stage_1")
     if identity_analysis.get("exclusion_signal") == "explicit_exclusion" and decision != "Nein":
-        contradicted.append("stage_1")
+        contradicted.add("stage_1")
 
     policy_decision = eligibility_analysis.get("policy_decision")
     policy_label = {"include": "Ja", "exclude": "Nein"}.get(policy_decision)
-    if policy_label is not None and decision != policy_label:
-        contradicted.append("stage_2")
+    if policy_decision == "uncertain":
+        contradicted.add("stage_2")
+    elif policy_label is not None and decision != policy_label:
+        contradicted.add("stage_2")
 
     if len(contradicted) == 2:
         return "both"
-    return contradicted[0] if contradicted else "none"
+    if "stage_1" in contradicted:
+        return "stage_1"
+    if "stage_2" in contradicted:
+        return "stage_2"
+    return "none"
 
 
 def normalize_final_review(
@@ -1088,18 +1469,34 @@ def normalize_final_review(
     eligibility_analysis: dict[str, Any],
     brand_proof: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Parse the independent final review and audit any declared override."""
+    """Parse the independent final review and enforce only safe output invariants.
+
+    Audit metadata disagreements are repaired and recorded. A positive result that
+    cannot satisfy a non-negotiable policy guardrail is conservatively normalized to
+    ``Nein`` with review required; it never raises and never escapes as an unsafe Ja.
+    """
     value = extract_json_object(raw_text)
+    contract_issues: list[dict[str, Any]] = []
     raw_decision = str(value.get("decision") or "").strip().casefold()
     if raw_decision not in {"ja", "nein"}:
         raise RuntimeError(f"Final review decision must be Ja or Nein, got: {value.get('decision')!r}")
-    decision = "Ja" if raw_decision == "ja" else "Nein"
+    reported_decision = "Ja" if raw_decision == "ja" else "Nein"
+    decision = reported_decision
+    identity_policy_group = _canonical_policy_group(
+        identity_analysis.get("policy_group")
+    )
+    final_policy_group_raw = str(value.get("final_policy_group") or "").strip()
+    final_policy_group = (
+        _canonical_policy_group(final_policy_group_raw)
+        if final_policy_group_raw
+        else identity_policy_group
+    )
 
     reason = str(value.get("reason") or "").strip()
     if not reason:
         raise RuntimeError("Final review is missing reason.")
     review_needed = _required_bool(value.get("review_needed"), "review_needed")
-    overrode_stage = _required_enum(
+    reported_overrode_stage = _required_enum(
         value.get("overrode_stage"),
         "overrode_stage",
         frozenset({"none", "stage_1", "stage_2", "both"}),
@@ -1108,46 +1505,114 @@ def normalize_final_review(
         decision,
         identity_analysis,
         eligibility_analysis,
+        final_policy_group,
     )
-    if overrode_stage != expected_override:
-        raise RuntimeError(
-            f"Final review declared overrode_stage={overrode_stage!r}, "
-            f"but decision requires {expected_override!r}."
+    if reported_overrode_stage != expected_override:
+        contract_issues.append(
+            _contract_issue(
+                "FINAL_OVERRIDE_METADATA_REPAIRED",
+                f"Final review declared {reported_overrode_stage!r}; derived override is {expected_override!r}.",
+                stage="stage_3",
+                fields=("overrode_stage",),
+            )
         )
+    overrode_stage = expected_override
     if overrode_stage != "none" and not review_needed:
-        raise RuntimeError("A final-stage override must set review_needed=true.")
+        review_needed = True
+        contract_issues.append(
+            _contract_issue(
+                "FINAL_OVERRIDE_REVIEW_ENABLED",
+                "A final-stage override requires review; review was enabled.",
+                stage="stage_3",
+                fields=("overrode_stage", "review_needed"),
+            )
+        )
+    elif (
+        identity_analysis.get("contract_issues")
+        or eligibility_analysis.get("contract_issues")
+    ) and not review_needed:
+        review_needed = True
+        contract_issues.append(
+            _contract_issue(
+                "FINAL_CONTRACT_REVIEW_ENABLED",
+                "A prior stage contains contract issues; final review was enabled for auditability.",
+                stage="stage_3",
+                fields=(
+                    "review_needed",
+                    "stage_1.contract_issues",
+                    "stage_2.contract_issues",
+                ),
+            )
+        )
 
-    policy_group = _canonical_policy_group(identity_analysis.get("policy_group"))
+    policy_group = final_policy_group
+    positive_guardrail_issues: list[dict[str, Any]] = []
     if decision == "Ja":
         if policy_group == "Other":
-            raise RuntimeError("The final reviewer cannot include policy_group Other.")
+            positive_guardrail_issues.append(
+                _contract_issue(
+                    "FINAL_OTHER_BLOCKED",
+                    "The final reviewer cannot include policy group Other.",
+                    stage="stage_3",
+                    fields=("decision", "policy_group"),
+                    severity="blocking",
+                )
+            )
         if policy_group in PACKAGED_EXCEPTION_POLICY_GROUPS:
             if brand_proof is None:
-                raise RuntimeError(
-                    f"The final reviewer cannot include {policy_group} without verified brand evidence."
-                )
-            if eligibility_analysis.get("eligibility_route") != "packaged_exception":
-                raise RuntimeError(
-                    f"The final reviewer cannot bypass packaged_exception for {policy_group}."
+                positive_guardrail_issues.append(
+                    _contract_issue(
+                        "FINAL_PACKAGED_BRAND_BLOCKED",
+                        f"The final reviewer cannot include {policy_group} without verified brand evidence.",
+                        stage="stage_3",
+                        fields=("decision", "policy_group", "verified_brand_proof"),
+                        severity="blocking",
+                    )
                 )
             if policy_group in {"Cheese", "Sausage"}:
                 package_size_grams = _parse_float(
                     eligibility_analysis.get("package_size_grams")
                 )
                 if package_size_grams is None or package_size_grams < 500:
-                    raise RuntimeError(
-                        f"The final reviewer cannot include {policy_group} below a proven 500 g."
+                    positive_guardrail_issues.append(
+                        _contract_issue(
+                            "FINAL_PACKAGE_SIZE_BLOCKED",
+                            f"The final reviewer cannot include {policy_group} without a proven 500 g package size.",
+                            stage="stage_3",
+                            fields=("decision", "policy_group", "package_size_grams"),
+                            severity="blocking",
+                        )
                     )
+
+    rule_id = _normalize_rule_id(value.get("rule_id"))
+    if positive_guardrail_issues:
+        contract_issues.extend(positive_guardrail_issues)
+        decision = "Nein"
+        review_needed = True
+        rule_id = "FINAL_POLICY_GUARDRAIL"
+        reason = "Positive Entscheidung durch Policy-Guardrail blockiert; manuelle Prüfung erforderlich"
+        overrode_stage = _expected_override_stage(
+            decision,
+            identity_analysis,
+            eligibility_analysis,
+            final_policy_group,
+        )
 
     return {
         "decision": decision,
         "label": decision,
         "reason": reason,
-        "rule_id": _normalize_rule_id(value.get("rule_id")),
+        "rule_id": rule_id,
         "confidence": _required_confidence(value.get("confidence")),
         "review_needed": review_needed,
         "overrode_stage": overrode_stage,
         "evidence": _normalize_evidence(value.get("evidence")),
+        "reported_decision": reported_decision,
+        "final_policy_group": final_policy_group,
+        "stage_1_policy_group": identity_policy_group,
+        "reported_overrode_stage": reported_overrode_stage,
+        "contract_issues": contract_issues,
+        "normalization_applied": bool(contract_issues),
     }
 
 
@@ -1165,6 +1630,280 @@ def validate_final_decision(
         brand_proof=brand_proof,
     )
     return review["decision"], review["reason"]
+
+
+def _fallback_identity_analysis(
+    row: dict[str, str],
+    error: dict[str, Any],
+) -> dict[str, Any]:
+    product_name = str(row.get("product_name") or "").strip() or "<unknown product>"
+    issue = _contract_issue(
+        "STAGE_1_UNAVAILABLE",
+        "Stage 1 remained unusable after all retries; identity is unknown.",
+        stage="stage_1",
+        fields=("identity_analysis",),
+        severity="blocking",
+        kind="technical_failure",
+    )
+    return {
+        "product_type": "unknown product",
+        "product_family": "unknown",
+        "policy_group": "Other",
+        "temperature_state": "unknown",
+        "processing_state": "unknown",
+        "source_brand": None,
+        "brand_evidence": None,
+        "brand_evidence_source": "unknown",
+        "exclusion_signal": "uncertain",
+        "hard_exclusion": False,
+        "exclusion_reason": "",
+        "confidence": 0.0,
+        "evidence": [product_name],
+        "contract_issues": [issue],
+        "stage_error": error,
+        "fallback": True,
+    }
+
+
+def _fallback_eligibility_analysis(
+    identity_analysis: dict[str, Any],
+    brand_proof: dict[str, Any] | None,
+    error: dict[str, Any],
+) -> dict[str, Any]:
+    product_group = _canonical_policy_group(identity_analysis.get("policy_group"))
+    issue = _contract_issue(
+        "STAGE_2_UNAVAILABLE",
+        "Stage 2 remained unusable after all retries; policy decision requires review.",
+        stage="stage_2",
+        fields=("eligibility_analysis",),
+        severity="blocking",
+        kind="technical_failure",
+    )
+    return {
+        "policy_decision": "uncertain",
+        "eligibility_route": "none",
+        "product_group": product_group,
+        "required_brand_found": True if brand_proof is not None else None,
+        "package_size_grams": None,
+        "requirements_met": False,
+        "rule_id": "STAGE_2_ERROR",
+        "reason": "Policy-Prüfung technisch fehlgeschlagen",
+        "failure_reason": "Policy-Prüfung technisch fehlgeschlagen",
+        "confidence": 0.0,
+        "review_needed": True,
+        "evidence": list(identity_analysis.get("evidence") or [product_group]),
+        "verified_brand_found": brand_proof is not None,
+        "verified_brand": (brand_proof or {}).get("brand"),
+        "stage_1_product_group": product_group,
+        "product_group_changed": False,
+        "reported_policy_decision": None,
+        "reported_eligibility_route": None,
+        "reported_product_group": None,
+        "reported_required_brand_found": None,
+        "contract_issues": [issue],
+        "normalization_applied": True,
+        "stage_error": error,
+        "fallback": True,
+    }
+
+
+def _fallback_final_review(
+    identity_analysis: dict[str, Any],
+    eligibility_analysis: dict[str, Any],
+    product_name: str,
+    error: dict[str, Any],
+) -> dict[str, Any]:
+    issue = _contract_issue(
+        "STAGE_3_UNAVAILABLE",
+        "Stage 3 remained unusable after all retries; emitted a conservative review result.",
+        stage="stage_3",
+        fields=("final_review",),
+        severity="blocking",
+        kind="technical_failure",
+    )
+    decision = "Nein"
+    policy_group = _canonical_policy_group(identity_analysis.get("policy_group"))
+    return {
+        "decision": decision,
+        "label": decision,
+        "reason": "Technischer Klassifizierungsfehler; manuelle Prüfung erforderlich",
+        "rule_id": "CLASSIFICATION_ERROR",
+        "confidence": 0.0,
+        "review_needed": True,
+        "overrode_stage": _expected_override_stage(
+            decision,
+            identity_analysis,
+            eligibility_analysis,
+        ),
+        "evidence": [product_name],
+        "reported_decision": None,
+        "final_policy_group": policy_group,
+        "stage_1_policy_group": policy_group,
+        "reported_overrode_stage": None,
+        "contract_issues": [issue],
+        "normalization_applied": True,
+        "stage_error": error,
+        "fallback": True,
+    }
+
+
+def _collect_contract_issues(*stages: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    for stage in stages:
+        stage_issues = stage.get("contract_issues")
+        if isinstance(stage_issues, list):
+            issues.extend(issue for issue in stage_issues if isinstance(issue, dict))
+    return issues
+
+
+def _effective_final_route(label: str, policy_group: str) -> str:
+    if label != "Ja":
+        return "none"
+    if policy_group in CORE_FRESH_POLICY_GROUPS:
+        return "core_fresh"
+    if policy_group in PACKAGED_EXCEPTION_POLICY_GROUPS:
+        return "packaged_exception"
+    return "none"
+
+
+def _build_relevance_trace(
+    *,
+    index: int,
+    row: dict[str, str],
+    model: str,
+    product_evidence: dict[str, Any],
+    brand_proof: dict[str, Any] | None,
+    identity_analysis: dict[str, Any],
+    eligibility_analysis: dict[str, Any],
+    final_review: dict[str, Any],
+    stage_errors: list[dict[str, Any]],
+    resumed_stages: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    contract_issues = _collect_contract_issues(
+        identity_analysis,
+        eligibility_analysis,
+        final_review,
+    )
+    if stage_errors:
+        classification_status = "technical_error"
+    elif contract_issues or final_review.get("review_needed"):
+        classification_status = "review"
+    else:
+        classification_status = "ok"
+
+    label = final_review["decision"]
+    reason = final_review["reason"]
+    stage_1_policy_group = identity_analysis["policy_group"]
+    policy_group = final_review.get("final_policy_group", stage_1_policy_group)
+    effective_final_route = _effective_final_route(label, policy_group)
+    return {
+        "schema_version": TRACE_SCHEMA_VERSION,
+        "row_number": index + 1,
+        "supplier": str(row.get("supplier") or "").strip(),
+        "product_name": str(row.get("product_name") or "").strip(),
+        "model": model,
+        "implementation_digest": RELEVANCE_IMPLEMENTATION_DIGEST,
+        "decision_source": "three_stage_model_v4_resilient",
+        "classification_status": classification_status,
+        "contract_issues": contract_issues,
+        "stage_errors": stage_errors,
+        "resumed_stages": list(resumed_stages),
+        "row_error": stage_errors[-1] if stage_errors else None,
+        "reported_stage_2_route": eligibility_analysis.get(
+            "reported_eligibility_route",
+            eligibility_analysis.get("eligibility_route"),
+        ),
+        "effective_final_route": effective_final_route,
+        "product_evidence": product_evidence,
+        "verified_brand_proof": brand_proof,
+        "stage_1_facts": identity_analysis,
+        "stage_2_policy": eligibility_analysis,
+        # Compatibility aliases for existing trace readers.
+        "stage_1_identity": identity_analysis,
+        "stage_2_eligibility": eligibility_analysis,
+        "stage_3_final": final_review,
+        "audit": {
+            "decision": label,
+            "reason": reason,
+            "rule_id": final_review["rule_id"],
+            "confidence": final_review["confidence"],
+            "review_needed": final_review["review_needed"],
+            "overrode_stage": final_review["overrode_stage"],
+            "evidence": final_review["evidence"],
+            "policy_group": policy_group,
+            "stage_1_policy_group": stage_1_policy_group,
+            "policy_decision": eligibility_analysis["policy_decision"],
+            "eligibility_route": eligibility_analysis["eligibility_route"],
+            "effective_final_route": effective_final_route,
+            "verified_brand": (brand_proof or {}).get("brand"),
+            "verified_brand_source": (brand_proof or {}).get("source"),
+            "classification_status": classification_status,
+            "contract_issue_codes": [issue.get("code") for issue in contract_issues],
+            "stage_error_count": len(stage_errors),
+        },
+    }
+
+
+def _failed_row_result(
+    index: int,
+    row: dict[str, str],
+    model: str,
+    exc: Exception,
+    max_retries: int,
+) -> tuple[int, str, str, dict[str, Any]]:
+    """Last-resort isolation boundary: materialize an error row, never abort a batch."""
+    product_name = str(row.get("product_name") or "").strip() or "<unknown product>"
+    error = _stage_error("row", exc, max_retries)
+    brand_proof = resolve_approved_brand(row)
+    identity = _fallback_identity_analysis(row, error)
+    eligibility = _fallback_eligibility_analysis(identity, brand_proof, error)
+    final = _fallback_final_review(identity, eligibility, product_name, error)
+    trace = _build_relevance_trace(
+        index=index,
+        row=row,
+        model=model,
+        product_evidence=build_product_evidence(row),
+        brand_proof=brand_proof,
+        identity_analysis=identity,
+        eligibility_analysis=eligibility,
+        final_review=final,
+        stage_errors=[error],
+    )
+    return index, final["decision"], final["reason"], trace
+
+
+def _technical_stage_result(
+    *,
+    index: int,
+    row: dict[str, str],
+    model: str,
+    product_evidence: dict[str, Any],
+    brand_proof: dict[str, Any] | None,
+    identity_analysis: dict[str, Any],
+    eligibility_analysis: dict[str, Any],
+    error: dict[str, Any],
+    resumed_stages: list[str],
+) -> tuple[int, str, str, dict[str, Any]]:
+    product_name = str(row.get("product_name") or "").strip() or "<unknown product>"
+    final_review = _fallback_final_review(
+        identity_analysis,
+        eligibility_analysis,
+        product_name,
+        error,
+    )
+    trace = _build_relevance_trace(
+        index=index,
+        row=row,
+        model=model,
+        product_evidence=product_evidence,
+        brand_proof=brand_proof,
+        identity_analysis=identity_analysis,
+        eligibility_analysis=eligibility_analysis,
+        final_review=final_review,
+        stage_errors=[error],
+        resumed_stages=tuple(resumed_stages),
+    )
+    return index, final_review["decision"], final_review["reason"], trace
 
 
 def classify_row(
@@ -1196,98 +1935,198 @@ def classify_row_with_trace(
     base_url: str,
     timeout_seconds: int,
     max_retries: int,
+    resume_trace: dict[str, Any] | None = None,
+    circuit_breaker: RelevanceCircuitBreaker | None = None,
 ) -> tuple[int, str, str, dict[str, Any]]:
     require_deepseek_pro_model(model)
-    product_name = row.get("product_name", "").strip() or "<unknown product>"
+    product_name = str(row.get("product_name") or "").strip() or "<unknown product>"
     product_evidence = build_product_evidence(row)
     brand_proof = resolve_approved_brand(row)
-    identity_analysis = call_model_stage(
-        stage_name="stage 1 identity analysis",
-        row_number=index + 1,
-        product_name=product_name,
-        api_key=api_key,
-        model=model,
-        base_url=base_url,
-        timeout_seconds=timeout_seconds,
-        max_retries=max_retries,
-        prompt=build_identity_prompt(row),
-        system_prompt=JSON_STAGE_SYSTEM_PROMPT,
-        parser=normalize_identity_analysis,
+    if not (
+        isinstance(resume_trace, dict)
+        and resume_trace.get("schema_version") == TRACE_SCHEMA_VERSION
+        and resume_trace.get("model") == model
+        and resume_trace.get("implementation_digest") == RELEVANCE_IMPLEMENTATION_DIGEST
+        and resume_trace.get("product_evidence") == product_evidence
+    ):
+        resume_trace = None
+    stage_errors: list[dict[str, Any]] = []
+    resumed_stages: list[str] = []
+    previous_errors = {
+        str(error.get("stage"))
+        for error in (resume_trace or {}).get("stage_errors", [])
+        if isinstance(error, dict)
+    }
+    reusable_stage_1 = (resume_trace or {}).get("stage_1_facts")
+    can_resume_stage_1 = (
+        isinstance(reusable_stage_1, dict)
+        and not reusable_stage_1.get("fallback")
+        and not previous_errors.intersection({"row", "stage_1"})
     )
+    if can_resume_stage_1:
+        identity_analysis = reusable_stage_1
+        resumed_stages.append("stage_1")
+    else:
+        identity_analysis = None
 
-    eligibility_analysis = call_model_stage(
-        stage_name="stage 2 eligibility analysis",
-        row_number=index + 1,
-        product_name=product_name,
-        api_key=api_key,
-        model=model,
-        base_url=base_url,
-        timeout_seconds=timeout_seconds,
-        max_retries=max_retries,
-        prompt=build_eligibility_prompt(row, identity_analysis, brand_proof),
-        system_prompt=JSON_STAGE_SYSTEM_PROMPT,
-        parser=lambda raw_text: normalize_eligibility_analysis(
-            raw_text,
-            identity_analysis=identity_analysis,
-            brand_proof=brand_proof,
-        ),
+    if identity_analysis is None:
+        try:
+            identity_analysis = call_model_stage(
+                stage_name="stage 1 identity analysis",
+                row_number=index + 1,
+                product_name=product_name,
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+                timeout_seconds=timeout_seconds,
+                max_retries=max_retries,
+                prompt=build_identity_prompt(row),
+                system_prompt=JSON_STAGE_SYSTEM_PROMPT,
+                parser=normalize_identity_analysis,
+                circuit_breaker=circuit_breaker,
+            )
+        except Exception as exc:
+            error = _stage_error("stage_1", exc, max_retries)
+            stage_errors.append(error)
+            LOGGER.error(
+                "Relevance stage 1 exhausted for row=%d product=%s; continuing with review fallback: %s",
+                index + 1,
+                product_name,
+                error["message"],
+            )
+            identity_analysis = _fallback_identity_analysis(row, error)
+            if _is_transport_failure(exc):
+                eligibility_analysis = _fallback_eligibility_analysis(
+                    identity_analysis,
+                    brand_proof,
+                    error,
+                )
+                return _technical_stage_result(
+                    index=index,
+                    row=row,
+                    model=model,
+                    product_evidence=product_evidence,
+                    brand_proof=brand_proof,
+                    identity_analysis=identity_analysis,
+                    eligibility_analysis=eligibility_analysis,
+                    error=error,
+                    resumed_stages=resumed_stages,
+                )
+
+    reusable_stage_2 = (resume_trace or {}).get("stage_2_policy")
+    can_resume_stage_2 = (
+        can_resume_stage_1
+        and isinstance(reusable_stage_2, dict)
+        and not reusable_stage_2.get("fallback")
+        and not previous_errors.intersection({"row", "stage_1", "stage_2"})
     )
+    if can_resume_stage_2:
+        eligibility_analysis = reusable_stage_2
+        resumed_stages.append("stage_2")
+    else:
+        eligibility_analysis = None
 
-    final_review = call_model_stage(
-        stage_name="stage 3 final decision",
-        row_number=index + 1,
-        product_name=product_name,
-        api_key=api_key,
-        model=model,
-        base_url=base_url,
-        timeout_seconds=timeout_seconds,
-        max_retries=max_retries,
-        prompt=build_final_decision_prompt(
-            row,
+    if eligibility_analysis is None:
+        try:
+            eligibility_analysis = call_model_stage(
+                stage_name="stage 2 eligibility analysis",
+                row_number=index + 1,
+                product_name=product_name,
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+                timeout_seconds=timeout_seconds,
+                max_retries=max_retries,
+                prompt=build_eligibility_prompt(row, identity_analysis, brand_proof),
+                system_prompt=JSON_STAGE_SYSTEM_PROMPT,
+                parser=lambda raw_text: normalize_eligibility_analysis(
+                    raw_text,
+                    identity_analysis=identity_analysis,
+                    brand_proof=brand_proof,
+                ),
+                circuit_breaker=circuit_breaker,
+            )
+        except Exception as exc:
+            error = _stage_error("stage_2", exc, max_retries)
+            stage_errors.append(error)
+            LOGGER.error(
+                "Relevance stage 2 exhausted for row=%d product=%s; continuing with review fallback: %s",
+                index + 1,
+                product_name,
+                error["message"],
+            )
+            eligibility_analysis = _fallback_eligibility_analysis(
+                identity_analysis,
+                brand_proof,
+                error,
+            )
+            if _is_transport_failure(exc):
+                return _technical_stage_result(
+                    index=index,
+                    row=row,
+                    model=model,
+                    product_evidence=product_evidence,
+                    brand_proof=brand_proof,
+                    identity_analysis=identity_analysis,
+                    eligibility_analysis=eligibility_analysis,
+                    error=error,
+                    resumed_stages=resumed_stages,
+                )
+
+    try:
+        final_review = call_model_stage(
+            stage_name="stage 3 final decision",
+            row_number=index + 1,
+            product_name=product_name,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+            prompt=build_final_decision_prompt(
+                row,
+                identity_analysis,
+                eligibility_analysis,
+                brand_proof,
+            ),
+            system_prompt=FINAL_STAGE_SYSTEM_PROMPT,
+            parser=lambda raw_text: normalize_final_review(
+                raw_text,
+                identity_analysis,
+                eligibility_analysis,
+                brand_proof=brand_proof,
+            ),
+            circuit_breaker=circuit_breaker,
+        )
+    except Exception as exc:
+        error = _stage_error("stage_3", exc, max_retries)
+        stage_errors.append(error)
+        LOGGER.error(
+            "Relevance stage 3 exhausted for row=%d product=%s; emitting conservative review result: %s",
+            index + 1,
+            product_name,
+            error["message"],
+        )
+        final_review = _fallback_final_review(
             identity_analysis,
             eligibility_analysis,
-            brand_proof,
-        ),
-        system_prompt=FINAL_STAGE_SYSTEM_PROMPT,
-        parser=lambda raw_text: normalize_final_review(
-            raw_text,
-            identity_analysis,
-            eligibility_analysis,
-            brand_proof=brand_proof,
-        ),
-    )
+            product_name,
+            error,
+        )
     label = final_review["decision"]
     reason = final_review["reason"]
-    trace = {
-        "schema_version": TRACE_SCHEMA_VERSION,
-        "row_number": index + 1,
-        "supplier": str(row.get("supplier") or "").strip(),
-        "product_name": str(row.get("product_name") or "").strip(),
-        "model": model,
-        "decision_source": "three_stage_model_v3",
-        "product_evidence": product_evidence,
-        "verified_brand_proof": brand_proof,
-        "stage_1_facts": identity_analysis,
-        "stage_2_policy": eligibility_analysis,
-        # Compatibility aliases for existing trace readers.
-        "stage_1_identity": identity_analysis,
-        "stage_2_eligibility": eligibility_analysis,
-        "stage_3_final": final_review,
-        "audit": {
-            "decision": label,
-            "reason": reason,
-            "rule_id": final_review["rule_id"],
-            "confidence": final_review["confidence"],
-            "review_needed": final_review["review_needed"],
-            "overrode_stage": final_review["overrode_stage"],
-            "evidence": final_review["evidence"],
-            "policy_group": identity_analysis["policy_group"],
-            "policy_decision": eligibility_analysis["policy_decision"],
-            "eligibility_route": eligibility_analysis["eligibility_route"],
-            "verified_brand": (brand_proof or {}).get("brand"),
-            "verified_brand_source": (brand_proof or {}).get("source"),
-        },
-    }
+    trace = _build_relevance_trace(
+        index=index,
+        row=row,
+        model=model,
+        product_evidence=product_evidence,
+        brand_proof=brand_proof,
+        identity_analysis=identity_analysis,
+        eligibility_analysis=eligibility_analysis,
+        final_review=final_review,
+        stage_errors=stage_errors,
+        resumed_stages=tuple(resumed_stages),
+    )
     return index, label, reason, trace
 
 
@@ -1296,8 +2135,8 @@ def log_relevance_decision(index: int, row: dict[str, str], label: str, reason: 
     LOGGER.info(
         "Relevance decision row=%d supplier=%s category=%s product=%s decision=%s reason=%s",
         index + 1,
-        row.get("supplier", "").strip(),
-        row.get("category", "").strip(),
+        str(row.get("supplier") or "").strip(),
+        str(row.get("category") or "").strip(),
         product_name,
         label,
         reason,
@@ -1349,12 +2188,34 @@ def save_rows(
             stage_2 = stage_2 if isinstance(stage_2, dict) else {}
             brand_proof = trace.get("verified_brand_proof") if isinstance(trace, dict) else None
             brand_proof = brand_proof if isinstance(brand_proof, dict) else {}
-            output_row["relevance_policy_group"] = stage_1.get("policy_group", "")
+            output_row["relevance_policy_group"] = final_review.get(
+                "final_policy_group",
+                stage_1.get("policy_group", ""),
+            )
+            output_row["relevance_stage_1_policy_group"] = stage_1.get(
+                "policy_group",
+                "",
+            )
             output_row["relevance_policy_decision"] = stage_2.get("policy_decision", "")
-            output_row["relevance_route"] = stage_2.get("eligibility_route", "")
+            output_row["relevance_route"] = trace.get(
+                "effective_final_route",
+                stage_2.get("eligibility_route", ""),
+            )
             output_row["relevance_brand"] = brand_proof.get("brand", "")
             output_row["relevance_brand_source"] = brand_proof.get("source", "")
             output_row["relevance_brand_evidence"] = brand_proof.get("evidence", "")
+            output_row["relevance_processing_status"] = trace.get(
+                "classification_status",
+                "",
+            )
+            contract_issues = trace.get("contract_issues")
+            output_row["relevance_contract_issues"] = (
+                _compact_json(contract_issues) if isinstance(contract_issues, list) else ""
+            )
+            stage_errors = trace.get("stage_errors")
+            output_row["relevance_stage_errors"] = (
+                _compact_json(stage_errors) if isinstance(stage_errors, list) else ""
+            )
             output_row["relevance_trace_schema_version"] = trace.get("schema_version", "")
             writer.writerow(output_row)
 
@@ -1367,6 +2228,141 @@ def save_relevance_traces(output_path: Path, traces: list[dict[str, Any]]) -> No
         for trace in traces:
             handle.write(json.dumps(trace, ensure_ascii=False, separators=(",", ":")) + "\n")
     tmp_path.replace(output_path)
+
+
+def derive_checkpoint_path(trace_output_path: Path) -> Path:
+    return trace_output_path.with_name(f"{trace_output_path.stem}_checkpoint.jsonl")
+
+
+def acquire_relevance_run_lock(output_path: Path) -> Any:
+    """Prevent two processes from writing the same output/checkpoint concurrently."""
+    lock_path = output_path.with_suffix(output_path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        handle.close()
+        raise RuntimeError(
+            f"Another relevance run is already using this output: {lock_path}"
+        ) from exc
+    return handle
+
+
+def release_relevance_run_lock(handle: Any) -> None:
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def _row_fingerprint(
+    index: int,
+    row: dict[str, str],
+    model: str,
+    base_url: str = DEFAULT_DEEPSEEK_BASE_URL,
+) -> str:
+    payload = {
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "trace_schema_version": TRACE_SCHEMA_VERSION,
+        "implementation_digest": RELEVANCE_IMPLEMENTATION_DIGEST,
+        "model": model,
+        "base_url": base_url.rstrip("/"),
+        "row_index": index,
+        "product_evidence": build_product_evidence(row),
+    }
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def load_relevance_checkpoint(
+    checkpoint_path: Path,
+    rows: list[dict[str, str]],
+    model: str,
+    base_url: str = DEFAULT_DEEPSEEK_BASE_URL,
+) -> dict[int, tuple[str, str, dict[str, Any]]]:
+    """Load matching complete or partial rows for row- and stage-level resume."""
+    if not checkpoint_path.exists():
+        return {}
+
+    loaded: dict[int, tuple[str, str, dict[str, Any]]] = {}
+    try:
+        with checkpoint_path.open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                try:
+                    record = json.loads(line)
+                    index = int(record["index"])
+                    label = record["label"]
+                    reason = record["reason"]
+                    trace = record["trace"]
+                    if record.get("checkpoint_schema_version") != CHECKPOINT_SCHEMA_VERSION:
+                        continue
+                    if not 0 <= index < len(rows):
+                        continue
+                    if record.get("fingerprint") != _row_fingerprint(
+                        index,
+                        rows[index],
+                        model,
+                        base_url,
+                    ):
+                        continue
+                    if label not in {"Ja", "Nein"} or not isinstance(reason, str):
+                        continue
+                    if not isinstance(trace, dict):
+                        continue
+                    if trace.get("schema_version") != TRACE_SCHEMA_VERSION:
+                        continue
+                    if trace.get("model") != model:
+                        continue
+                    if trace.get("implementation_digest") != RELEVANCE_IMPLEMENTATION_DIGEST:
+                        continue
+                    if trace.get("product_evidence") != build_product_evidence(rows[index]):
+                        continue
+                    loaded[index] = (label, reason, trace)
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    LOGGER.warning(
+                        "Ignoring invalid relevance checkpoint line %d in %s: %s",
+                        line_number,
+                        checkpoint_path,
+                        exc,
+                    )
+    except OSError as exc:
+        LOGGER.warning(
+            "Cannot read relevance checkpoint %s; continuing without resume: %s",
+            checkpoint_path,
+            exc,
+        )
+        return {}
+    return loaded
+
+
+def append_relevance_checkpoint(
+    handle: Any,
+    *,
+    index: int,
+    row: dict[str, str],
+    model: str,
+    base_url: str,
+    label: str,
+    reason: str,
+    trace: dict[str, Any],
+) -> None:
+    record = {
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "implementation_digest": RELEVANCE_IMPLEMENTATION_DIGEST,
+        "fingerprint": _row_fingerprint(index, row, model, base_url),
+        "index": index,
+        "label": label,
+        "reason": reason,
+        "trace": trace,
+    }
+    handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+    handle.flush()
 
 
 def main() -> None:
@@ -1393,7 +2389,7 @@ def main() -> None:
     )
 
 
-def run_relevance_classification(
+def _run_relevance_classification_impl(
     input_path: Path,
     output_path: Path | None = None,
     workers: int = DEFAULT_WORKERS,
@@ -1433,11 +2429,48 @@ def run_relevance_classification(
 
     print(f"Loaded {len(rows)} rows from {input_path}")
     print(f"Using model {deepseek_model} with {workers} concurrent requests")
+    effective_base_url = deepseek_base_url or os.environ.get(
+        "DEEPSEEK_BASE_URL",
+        DEFAULT_DEEPSEEK_BASE_URL,
+    )
 
     results: list[tuple[str, str]] = [("", "")] * len(rows)
     traces: list[dict[str, Any]] = [{} for _row in rows]
-    completed = 0
+    checkpoint_path = derive_checkpoint_path(trace_output_path)
+    checkpoint_records = load_relevance_checkpoint(
+        checkpoint_path,
+        rows,
+        deepseek_model,
+        effective_base_url,
+    )
+    checkpoint_rows = {
+        index: record
+        for index, record in checkpoint_records.items()
+        if record[2].get("classification_status") != "technical_error"
+    }
+    partial_checkpoint_rows = {
+        index: record[2]
+        for index, record in checkpoint_records.items()
+        if record[2].get("classification_status") == "technical_error"
+    }
+    for index, (label, reason, trace) in checkpoint_rows.items():
+        results[index] = (label, reason)
+        traces[index] = trace
+    completed = len(checkpoint_rows)
+    if checkpoint_rows:
+        print(
+            f"Resumed {len(checkpoint_rows)}/{len(rows)} completed rows from "
+            f"{checkpoint_path}"
+        )
+    if partial_checkpoint_rows:
+        print(
+            f"Resuming {len(partial_checkpoint_rows)} technical row(s) from their "
+            "last successful model stage"
+        )
 
+    circuit_breaker = RelevanceCircuitBreaker(
+        failure_threshold=max(5, workers)
+    )
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_index = {
             executor.submit(
@@ -1446,36 +2479,157 @@ def run_relevance_classification(
                 row,
                 deepseek_api_key,
                 deepseek_model,
-                deepseek_base_url or os.environ.get("DEEPSEEK_BASE_URL", DEFAULT_DEEPSEEK_BASE_URL),
+                effective_base_url,
                 deepseek_timeout,
                 max_retries,
+                resume_trace=partial_checkpoint_rows.get(index),
+                circuit_breaker=circuit_breaker,
             ): index
             for index, row in enumerate(rows)
+            if index not in checkpoint_rows
         }
 
+        checkpoint_handle = None
+        checkpoint_available = False
+        try:
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            checkpoint_handle = checkpoint_path.open("a", encoding="utf-8")
+            checkpoint_available = True
+        except OSError as exc:
+            LOGGER.warning(
+                "Cannot open relevance checkpoint %s; continuing without checkpointing: %s",
+                checkpoint_path,
+                exc,
+            )
         try:
             for future in as_completed(future_to_index):
-                index, label, reason, trace = future.result()
+                submitted_index = future_to_index[future]
+                try:
+                    index, label, reason, trace = future.result()
+                except Exception as exc:  # Last-resort row isolation boundary.
+                    LOGGER.exception(
+                        "Unexpected relevance row failure row=%d product=%s; materializing error result",
+                        submitted_index + 1,
+                        str(rows[submitted_index].get("product_name") or "").strip(),
+                    )
+                    index, label, reason, trace = _failed_row_result(
+                        submitted_index,
+                        rows[submitted_index],
+                        deepseek_model,
+                        exc,
+                        max_retries,
+                    )
                 results[index] = (label, reason)
                 traces[index] = trace
                 log_relevance_decision(index, rows[index], label, reason)
+                # Persist technical rows too: their successful earlier stages can
+                # be reused while only the failed stage and its successors retry.
+                if checkpoint_handle is not None:
+                    try:
+                        append_relevance_checkpoint(
+                            checkpoint_handle,
+                            index=index,
+                            row=rows[index],
+                            model=deepseek_model,
+                            base_url=effective_base_url,
+                            label=label,
+                            reason=reason,
+                            trace=trace,
+                        )
+                    except (OSError, TypeError, ValueError) as exc:
+                        LOGGER.warning(
+                            "Cannot update relevance checkpoint %s; continuing without checkpointing: %s",
+                            checkpoint_path,
+                            exc,
+                        )
+                        checkpoint_handle.close()
+                        checkpoint_handle = None
+                        checkpoint_available = False
                 completed += 1
                 if completed == len(rows) or completed % workers == 0:
                     print(f"Processed {completed}/{len(rows)} rows")
-        except Exception:
-            executor.shutdown(wait=False, cancel_futures=True)
-            raise
+        finally:
+            if checkpoint_handle is not None:
+                checkpoint_handle.close()
 
     save_rows(output_path, fieldnames, rows, results, traces=traces)
     save_relevance_traces(trace_output_path, traces)
 
     yes_count = sum(1 for label, _reason in results if label == "Ja")
     no_count = sum(1 for label, _reason in results if label == "Nein")
+    review_count = sum(
+        1 for trace in traces if trace.get("classification_status") == "review"
+    )
+    technical_error_count = sum(
+        1 for trace in traces if trace.get("classification_status") == "technical_error"
+    )
     print(f"Saved {len(rows)} classified rows to {output_path}")
     print(f"Saved relevance decision traces to {trace_output_path}")
     print(f"Relevant=Ja: {yes_count}")
     print(f"Relevant=Nein: {no_count}")
+    print(f"Review required: {review_count}")
+    print(f"Technical row errors: {technical_error_count}")
+    if technical_error_count:
+        LOGGER.warning(
+            "Relevance classification completed with %d technical row error(s); "
+            "those rows are Nein/review and remain checkpointed for retry",
+            technical_error_count,
+        )
+        print(
+            (
+                "Completed rows and successful stages remain checkpointed. "
+                "Re-run the same command to retry only "
+                f"{technical_error_count} technical error row(s): {checkpoint_path}"
+                if checkpoint_available
+                else "Checkpoint writing was unavailable; a rerun will reprocess rows."
+            )
+        )
+        raise RelevanceBatchTechnicalError(
+            error_count=technical_error_count,
+            output_path=output_path,
+            trace_output_path=trace_output_path,
+            checkpoint_path=checkpoint_path,
+            checkpoint_available=checkpoint_available,
+            yes_count=yes_count,
+            no_count=no_count,
+        )
+    else:
+        try:
+            checkpoint_path.unlink(missing_ok=True)
+        except OSError as exc:
+            LOGGER.warning("Cannot remove completed checkpoint %s: %s", checkpoint_path, exc)
     return output_path, yes_count, no_count
+
+
+def run_relevance_classification(
+    input_path: Path,
+    output_path: Path | None = None,
+    workers: int = DEFAULT_WORKERS,
+    limit: int | None = None,
+    deepseek_base_url: str | None = None,
+    deepseek_model: str = DEFAULT_DEEPSEEK_MODEL,
+    deepseek_timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    trace_output_path: Path | None = None,
+) -> tuple[Path, int, int]:
+    """Run one relevance job under an exception-safe lock for its final CSV."""
+    resolved_input = resolve_input_path(input_path).resolve()
+    resolved_output = derive_output_path(resolved_input, output_path).resolve()
+    run_lock_handle = acquire_relevance_run_lock(resolved_output)
+    try:
+        return _run_relevance_classification_impl(
+            input_path=input_path,
+            output_path=output_path,
+            workers=workers,
+            limit=limit,
+            deepseek_base_url=deepseek_base_url,
+            deepseek_model=deepseek_model,
+            deepseek_timeout=deepseek_timeout,
+            max_retries=max_retries,
+            trace_output_path=trace_output_path,
+        )
+    finally:
+        release_relevance_run_lock(run_lock_handle)
 
 
 if __name__ == "__main__":

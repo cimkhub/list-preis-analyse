@@ -157,23 +157,32 @@ def test_json_stage_parsers_accept_fenced_json_and_preserve_unknown():
 
 
 def test_unknown_brand_cannot_be_turned_into_brand_missing_exclusion():
-    with pytest.raises(RuntimeError, match="Unknown brand evidence"):
-        relevance.normalize_eligibility_analysis(
-            json.dumps(
-                {
-                    "policy_decision": "exclude",
-                    "eligibility_route": "packaged_exception",
-                    "product_group": "Milk",
-                    "required_brand_found": None,
-                    "package_size_grams": None,
-                    "rule_id": "BRAND_MISSING",
-                    "reason": "Brand missing",
-                    "confidence": 0.6,
-                    "review_needed": True,
-                    "evidence": ["keine lesbare Marke"],
-                }
-            )
+    parsed = relevance.normalize_eligibility_analysis(
+        json.dumps(
+            {
+                "policy_decision": "exclude",
+                "eligibility_route": "packaged_exception",
+                "product_group": "Milk",
+                "required_brand_found": None,
+                "package_size_grams": None,
+                "rule_id": "BRAND_MISSING",
+                "reason": "Brand missing",
+                "confidence": 0.6,
+                "review_needed": True,
+                "evidence": ["keine lesbare Marke"],
+            }
         )
+    )
+
+    assert parsed["reported_policy_decision"] == "exclude"
+    assert parsed["reported_eligibility_route"] == "packaged_exception"
+    assert parsed["policy_decision"] == "uncertain"
+    assert parsed["eligibility_route"] == "none"
+    assert parsed["rule_id"] == "INSUFFICIENT_EVIDENCE"
+    assert parsed["review_needed"] is True
+    assert {
+        issue["code"] for issue in parsed["contract_issues"]
+    } >= {"UNKNOWN_BRAND_NOT_EXCLUSION", "NON_POSITIVE_ROUTE_REMOVED"}
 
 
 def test_v4_model_disables_thinking_for_small_classifier_stages():
@@ -240,9 +249,11 @@ def test_classify_row_runs_all_three_pro_model_stages_in_order(monkeypatch):
     ]
     assert all(call["model"] == "deepseek-v4-pro" for call in calls)
     assert (index, label, reason) == (7, "Ja", "Milk")
-    assert trace["schema_version"] == 3
+    assert trace["schema_version"] == 4
     assert trace["model"] == "deepseek-v4-pro"
-    assert trace["decision_source"] == "three_stage_model_v3"
+    assert trace["decision_source"] == "three_stage_model_v4_resilient"
+    assert trace["classification_status"] == "ok"
+    assert trace["stage_errors"] == []
     assert trace["stage_1_facts"]["product_family"] == "mopro"
     assert trace["stage_2_policy"]["policy_decision"] == "include"
     assert trace["stage_1_identity"] == trace["stage_1_facts"]
@@ -327,8 +338,13 @@ def test_pickled_cucumber_stage_group_correction_completes_all_three_stages(
         "Pickled preserved cucumber product",
     )
     assert trace["stage_2_policy"]["stage_1_product_group"] == "Obst Gemüse"
-    assert trace["stage_2_policy"]["product_group"] == "Other"
+    assert trace["stage_2_policy"]["product_group"] == "Obst Gemüse"
+    assert trace["stage_2_policy"]["reported_product_group"] == "Other"
     assert trace["stage_2_policy"]["product_group_changed"] is True
+    assert any(
+        issue["code"] == "STAGE_2_PRODUCT_GROUP_CHANGED"
+        for issue in trace["stage_2_policy"]["contract_issues"]
+    )
 
 
 def test_final_reviewer_can_override_both_prior_stages_when_declared():
@@ -385,8 +401,14 @@ def test_final_reviewer_can_override_both_prior_stages_when_declared():
 
     invalid = json.loads(response)
     invalid["overrode_stage"] = "none"
-    with pytest.raises(RuntimeError, match="decision requires 'both'"):
-        relevance.normalize_final_review(json.dumps(invalid), facts, policy)
+    repaired = relevance.normalize_final_review(json.dumps(invalid), facts, policy)
+    assert repaired["reported_overrode_stage"] == "none"
+    assert repaired["overrode_stage"] == "both"
+    assert repaired["review_needed"] is True
+    assert any(
+        issue["code"] == "FINAL_OVERRIDE_METADATA_REPAIRED"
+        for issue in repaired["contract_issues"]
+    )
 
 
 def test_final_stage_requires_structured_json():
@@ -490,10 +512,13 @@ def test_weekly_workflow_writes_compatible_csv_v2_audit_and_trace(tmp_path, monk
     assert rows[1]["relevance_route"] == "packaged_exception"
     assert rows[1]["relevance_brand"] == "ARO"
     assert rows[1]["relevance_brand_source"] == "product_name"
-    assert rows[0]["relevance_trace_schema_version"] == "3"
-    assert traces[0]["schema_version"] == 3
-    assert traces[0]["decision_source"] == "three_stage_model_v3"
-    assert traces[1]["decision_source"] == "three_stage_model_v3"
+    assert rows[0]["relevance_processing_status"] == "ok"
+    assert json.loads(rows[0]["relevance_contract_issues"]) == []
+    assert json.loads(rows[0]["relevance_stage_errors"]) == []
+    assert rows[0]["relevance_trace_schema_version"] == "4"
+    assert traces[0]["schema_version"] == 4
+    assert traces[0]["decision_source"] == "three_stage_model_v4_resilient"
+    assert traces[1]["decision_source"] == "three_stage_model_v4_resilient"
     assert traces[1]["verified_brand_proof"]["brand"] == "ARO"
     assert all(trace["stage_1_facts"] is not None for trace in traces)
     assert all(trace["stage_2_policy"] is not None for trace in traces)

@@ -86,6 +86,22 @@ def approved_brand_proof() -> dict:
     }
 
 
+def issue_codes(result: dict) -> set[str]:
+    return {
+        str(issue.get("code"))
+        for issue in result.get("contract_issues", [])
+        if isinstance(issue, dict)
+    }
+
+
+def blocking_issue_codes(result: dict) -> set[str]:
+    return {
+        str(issue.get("code"))
+        for issue in result.get("contract_issues", [])
+        if isinstance(issue, dict) and issue.get("severity") == "blocking"
+    }
+
+
 def test_product_evidence_is_an_exact_allowlist_and_prompts_do_not_leak_metadata():
     row = {
         **{field: f"allowed-{field}" for field in relevance.PRODUCT_EVIDENCE_FIELDS},
@@ -203,24 +219,38 @@ def test_unproven_or_substring_brand_is_rejected(row):
 
 
 @pytest.mark.parametrize("group", sorted(relevance.PACKAGED_EXCEPTION_POLICY_GROUPS))
-def test_additional_groups_cannot_use_core_fresh(group):
-    with pytest.raises(RuntimeError, match="packaged_exception"):
-        relevance.normalize_eligibility_analysis(
-            policy_payload(group, route="core_fresh"),
-            identity_analysis=identity(group),
-            brand_proof=approved_brand_proof(),
-        )
+def test_additional_groups_using_core_fresh_are_safely_downgraded(group):
+    parsed = relevance.normalize_eligibility_analysis(
+        policy_payload(group, route="core_fresh"),
+        identity_analysis=identity(group),
+        brand_proof=approved_brand_proof(),
+    )
+
+    assert parsed["policy_decision"] == "uncertain"
+    assert parsed["eligibility_route"] == "none"
+    assert parsed["requirements_met"] is False
+    assert parsed["review_needed"] is True
+    assert parsed["reported_policy_decision"] == "include"
+    assert parsed["reported_eligibility_route"] == "core_fresh"
+    assert "PACKAGED_ROUTE_MISMATCH" in blocking_issue_codes(parsed)
 
 
 @pytest.mark.parametrize("group", sorted(relevance.PACKAGED_EXCEPTION_POLICY_GROUPS))
-def test_additional_groups_cannot_be_positive_without_verified_brand(group):
+def test_additional_groups_without_verified_brand_are_safely_downgraded(group):
     size = 500 if group in {"Cheese", "Sausage"} else None
-    with pytest.raises(RuntimeError, match="verified|brand"):
-        relevance.normalize_eligibility_analysis(
-            policy_payload(group, package_size_grams=size),
-            identity_analysis=identity(group),
-            brand_proof=None,
-        )
+    parsed = relevance.normalize_eligibility_analysis(
+        policy_payload(group, package_size_grams=size),
+        identity_analysis=identity(group),
+        brand_proof=None,
+    )
+
+    assert parsed["policy_decision"] == "uncertain"
+    assert parsed["eligibility_route"] == "none"
+    assert parsed["requirements_met"] is False
+    assert parsed["review_needed"] is True
+    assert parsed["verified_brand_found"] is False
+    assert parsed["reported_policy_decision"] == "include"
+    assert "PACKAGED_BRAND_UNVERIFIED" in blocking_issue_codes(parsed)
 
 
 @pytest.mark.parametrize("group", sorted(relevance.PACKAGED_EXCEPTION_POLICY_GROUPS))
@@ -238,12 +268,18 @@ def test_additional_groups_accept_verified_brand_only_on_packaged_route(group):
 
 @pytest.mark.parametrize("group", ["Cheese", "Sausage"])
 def test_cheese_and_sausage_still_require_at_least_500_grams(group):
-    with pytest.raises(RuntimeError, match="at least 500 grams"):
-        relevance.normalize_eligibility_analysis(
-            policy_payload(group, package_size_grams=499),
-            identity_analysis=identity(group),
-            brand_proof=approved_brand_proof(),
-        )
+    parsed = relevance.normalize_eligibility_analysis(
+        policy_payload(group, package_size_grams=499),
+        identity_analysis=identity(group),
+        brand_proof=approved_brand_proof(),
+    )
+
+    assert parsed["policy_decision"] == "uncertain"
+    assert parsed["eligibility_route"] == "none"
+    assert parsed["requirements_met"] is False
+    assert parsed["review_needed"] is True
+    assert parsed["package_size_grams"] == 499
+    assert "PACKAGE_SIZE_REQUIREMENT_UNPROVEN" in blocking_issue_codes(parsed)
 
 
 @pytest.mark.parametrize("group", sorted(relevance.CORE_FRESH_POLICY_GROUPS))
@@ -277,9 +313,11 @@ def test_pickled_cucumbers_group_correction_is_nonfatal_for_negative_route():
 
     assert policy["policy_decision"] == "exclude"
     assert policy["eligibility_route"] == "none"
-    assert policy["product_group"] == "Other"
+    assert policy["product_group"] == "Obst Gemüse"
+    assert policy["reported_product_group"] == "Other"
     assert policy["stage_1_product_group"] == "Obst Gemüse"
     assert policy["product_group_changed"] is True
+    assert "STAGE_2_PRODUCT_GROUP_CHANGED" in issue_codes(policy)
     final = relevance.normalize_final_review(
         final_payload("Nein"),
         facts,
@@ -290,17 +328,26 @@ def test_pickled_cucumbers_group_correction_is_nonfatal_for_negative_route():
 
 
 def test_stage_2_group_change_cannot_create_a_positive_route():
-    with pytest.raises(RuntimeError, match="may change policy_group only"):
-        relevance.normalize_eligibility_analysis(
-            policy_payload(
-                "Fleisch",
-                decision="include",
-                route="core_fresh",
-                required_brand_found=None,
-            ),
-            identity_analysis=identity("Other"),
-            brand_proof=None,
-        )
+    parsed = relevance.normalize_eligibility_analysis(
+        policy_payload(
+            "Fleisch",
+            decision="include",
+            route="core_fresh",
+            required_brand_found=None,
+        ),
+        identity_analysis=identity("Other"),
+        brand_proof=None,
+    )
+
+    assert parsed["product_group"] == "Other"
+    assert parsed["stage_1_product_group"] == "Other"
+    assert parsed["reported_product_group"] == "Fleisch"
+    assert parsed["product_group_changed"] is True
+    assert parsed["policy_decision"] == "uncertain"
+    assert parsed["eligibility_route"] == "none"
+    assert parsed["review_needed"] is True
+    assert "STAGE_2_PRODUCT_GROUP_CHANGED" in issue_codes(parsed)
+    assert "OTHER_CANNOT_BE_POSITIVE" in blocking_issue_codes(parsed)
 
 
 def test_final_reviewer_cannot_bypass_brand_or_other_contract():
@@ -315,13 +362,17 @@ def test_final_reviewer_cannot_bypass_brand_or_other_contract():
         identity_analysis=milk_identity,
         brand_proof=None,
     )
-    with pytest.raises(RuntimeError, match="without verified brand evidence"):
-        relevance.normalize_final_review(
-            final_payload("Ja"),
-            milk_identity,
-            milk_policy,
-            brand_proof=None,
-        )
+    milk_final = relevance.normalize_final_review(
+        final_payload("Ja"),
+        milk_identity,
+        milk_policy,
+        brand_proof=None,
+    )
+    assert milk_final["reported_decision"] == "Ja"
+    assert milk_final["decision"] == "Nein"
+    assert milk_final["rule_id"] == "FINAL_POLICY_GUARDRAIL"
+    assert milk_final["review_needed"] is True
+    assert "FINAL_PACKAGED_BRAND_BLOCKED" in blocking_issue_codes(milk_final)
 
     other_identity = identity("Other", exclusion_signal="explicit_exclusion")
     other_policy = relevance.normalize_eligibility_analysis(
@@ -334,13 +385,17 @@ def test_final_reviewer_cannot_bypass_brand_or_other_contract():
         identity_analysis=other_identity,
         brand_proof=approved_brand_proof(),
     )
-    with pytest.raises(RuntimeError, match="policy_group Other"):
-        relevance.normalize_final_review(
-            final_payload("Ja", overrode_stage="both", review_needed=True),
-            other_identity,
-            other_policy,
-            brand_proof=approved_brand_proof(),
-        )
+    other_final = relevance.normalize_final_review(
+        final_payload("Ja", overrode_stage="both", review_needed=True),
+        other_identity,
+        other_policy,
+        brand_proof=approved_brand_proof(),
+    )
+    assert other_final["reported_decision"] == "Ja"
+    assert other_final["decision"] == "Nein"
+    assert other_final["rule_id"] == "FINAL_POLICY_GUARDRAIL"
+    assert other_final["review_needed"] is True
+    assert "FINAL_OTHER_BLOCKED" in blocking_issue_codes(other_final)
 
 
 def test_prompts_explicitly_protect_reported_product_group_edge_cases():
