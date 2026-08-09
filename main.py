@@ -138,6 +138,8 @@ def run_pipeline(week: int | None = None, year: int | None = None,
     logger = setup_logging(config.storage.logs_dir, week=week, year=year)
     logger.info("=" * 60)
     deepseek_profile, deepseek_model_id = resolve_deepseek_model(deepseek_model)
+    _relevance_profile, relevance_model_id = resolve_deepseek_model("pro")
+    _final_review_profile, final_review_model_id = resolve_deepseek_model("flash")
     deepseek_env = os.environ.copy()
     deepseek_env["DEEPSEEK_MODEL"] = deepseek_model_id
     deepseek_env["DEEPSEEK_SIGNAL_MODEL"] = deepseek_model_id
@@ -145,6 +147,11 @@ def run_pipeline(week: int | None = None, year: int | None = None,
         "DeepSeek model selection: %s -> %s",
         deepseek_profile,
         deepseek_model_id,
+    )
+    logger.info(
+        "Locked model roles: product relevance=%s (thinking enabled), final row review=%s",
+        relevance_model_id,
+        final_review_model_id,
     )
 
     logger.info(f"Running pipeline for {format_week(week, year)}")
@@ -493,7 +500,7 @@ def run_pipeline(week: int | None = None, year: int | None = None,
             relevant_csv_path, relevant_yes_count, relevant_no_count = run_relevance_classification(
                 input_path=combined_csv_path,
                 output_path=combined_csv_path.with_name("all_suppliers_relevant.csv"),
-                deepseek_model=deepseek_model_id,
+                deepseek_model=relevance_model_id,
             )
             relevant_csv_path, split_count = run_brand_product_split(
                 input_path=relevant_csv_path,
@@ -579,6 +586,37 @@ def run_pipeline(week: int | None = None, year: int | None = None,
         else:
             logger.info("Market forecast signal enrichment skipped by CLI flag")
 
+        # Stage 4d: Every customer-facing row receives one final, narrowly
+        # scoped Flash sanity check. The checker can only fix the category or
+        # remove a clearly out-of-scope row; source/offer values stay immutable.
+        logger.info("--- FINAL ROW QUALITY REVIEW ---")
+        final_review_audit_path = matched_competitor_path.with_name(
+            "final_row_quality_audit.jsonl"
+        )
+        with log_stage(
+            logger,
+            "Final customer row quality review",
+            event="final_row_quality_review",
+            workbook=str(matched_competitor_path),
+            audit_path=str(final_review_audit_path),
+            model=final_review_model_id,
+        ):
+            from final_row_quality_check import review_workbook_rows
+
+            final_review_stats = review_workbook_rows(
+                matched_competitor_path,
+                audit_path=final_review_audit_path,
+                model=final_review_model_id,
+            )
+        logger.info(
+            "Final row quality review completed: checked=%d kept=%d corrected=%d deleted=%d audit=%s",
+            final_review_stats["checked"],
+            final_review_stats["kept"],
+            final_review_stats["corrected"],
+            final_review_stats["deleted"],
+            final_review_stats["audit_path"],
+        )
+
         try:
             from openpyxl import load_workbook
             from add_market_forecast_signals import finalize_customer_workbook
@@ -590,7 +628,7 @@ def run_pipeline(week: int | None = None, year: int | None = None,
         except Exception as exc:
             logger.warning("Final customer workbook cleanup failed: %s", exc, exc_info=True)
 
-        # Stage 4d: Upload the final customer workbook to the shared LIST OneDrive folders.
+        # Stage 4e: Upload the final customer workbook to the shared LIST OneDrive folders.
         # This uses the browser UI because the client folder is accessible in the browser,
         # but not reliably through Microsoft Graph shared-link APIs.
         if not skip_onedrive_upload:
@@ -790,7 +828,8 @@ def main():
                         help="Pause browser upload so you can manually complete Microsoft login/email-code verification")
     parser.add_argument("--deepseek-model", default="pro",
                         help=(
-                            "DeepSeek model profile or exact model id. Use 'flash' or 'pro'. "
+                            "DeepSeek model profile for matching/forecast stages. Use 'flash' or 'pro'. "
+                            "Product relevance is always Pro with thinking enabled; the final row review is always Flash. "
                             "flash maps to DEEPSEEK_V4_FLASH_MODEL or deepseek-v4-flash; "
                             "pro maps to DEEPSEEK_V4_PRO_MODEL or deepseek-v4-pro."
                         ))

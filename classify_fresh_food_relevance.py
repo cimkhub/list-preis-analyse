@@ -19,7 +19,6 @@ from typing import Any
 import requests
 from src.harmonize.customer_rules import (
     apply_customer_category_overrides_to_row,
-    customer_exclusion_reason,
 )
 from src.report.parsed_csv import find_existing_combined_parsed_csv_path
 
@@ -35,7 +34,7 @@ DEFAULT_WORKERS = 25
 DEFAULT_TIMEOUT_SECONDS = 120
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEFAULT_DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_V4_PRO_MODEL", "deepseek-v4-pro")
 DEFAULT_MAX_TOKENS = 1024
 REASONER_MAX_TOKENS = 4096
 _THREAD_LOCAL = local()
@@ -212,7 +211,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--deepseek-model",
         default=DEFAULT_DEEPSEEK_MODEL,
-        help="DeepSeek model to use. Default: deepseek-v4-flash",
+        choices=[DEFAULT_DEEPSEEK_MODEL],
+        help="DeepSeek Pro model used for every product relevance decision.",
     )
     parser.add_argument(
         "--deepseek-timeout",
@@ -317,6 +317,15 @@ def max_tokens_for_model(model: str) -> int:
     if "reasoner" in model_key or "pro" in model_key:
         return REASONER_MAX_TOKENS
     return DEFAULT_MAX_TOKENS
+
+
+def require_relevance_pro_model(model: str) -> None:
+    """Prevent accidental use of Flash or another model for relevance."""
+    if model != DEFAULT_DEEPSEEK_MODEL:
+        raise RuntimeError(
+            "Product relevance is locked to the configured DeepSeek Pro model "
+            f"{DEFAULT_DEEPSEEK_MODEL!r}; got {model!r}."
+        )
 
 
 def normalize_classification(raw_text: str) -> tuple[str, str]:
@@ -578,6 +587,7 @@ def build_prompt(row: dict[str, str]) -> str:
             "",
             "Relevant = Ja if the offered product itself is a core fresh-food product, for example:",
             "- meat or poultry",
+            "- raw meat remains relevant when cut, minced, formed, skewered, or dry-seasoned; examples include Cevapcici, burger patties, meat strips, skewers, and BBQ cuts without sauce or marinade",
             "- fish or seafood",
             "- vegetables, salads, herbs, mushrooms, or potatoes",
             "- fruit",
@@ -626,6 +636,7 @@ def call_deepseek(
     timeout_seconds: int,
     prompt: str,
 ) -> dict[str, Any]:
+    require_relevance_pro_model(model)
     url = base_url.rstrip("/") + "/chat/completions"
     payload = {
         "model": model,
@@ -645,6 +656,9 @@ def call_deepseek(
         "temperature": 0,
         "max_tokens": max_tokens_for_model(model),
         "stream": False,
+        # DeepSeek V4 defaults may vary by endpoint. Relevance deliberately
+        # requests reasoning so every product receives the Pro thinking pass.
+        "thinking": {"type": "enabled"},
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -665,22 +679,7 @@ def classify_row(
     max_retries: int,
 ) -> tuple[int, str, str]:
     row = apply_customer_category_overrides_to_row(row)
-
-    customer_reason = customer_exclusion_reason(row)
-    if customer_reason:
-        return index, "Nein", customer_reason
-
-    exclusion_reason = explicit_exclusion_reason(row)
-    if exclusion_reason:
-        return index, "Nein", exclusion_reason
-
-    core_reason = explicit_core_food_reason(row)
-    if core_reason:
-        return index, "Ja", core_reason
-
-    explicit_reason = explicit_packaged_reason(row)
-    if explicit_reason:
-        return index, "Ja", explicit_reason
+    require_relevance_pro_model(model)
 
     prompt = build_prompt(row)
     product_name = row.get("product_name", "").strip() or "<unknown product>"
@@ -780,6 +779,7 @@ def run_relevance_classification(
     max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> tuple[Path, int, int]:
     load_env_file(ROOT / ".env")
+    require_relevance_pro_model(deepseek_model)
 
     if workers < 1:
         raise RuntimeError("--workers must be at least 1")
