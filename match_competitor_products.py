@@ -39,6 +39,18 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from tqdm import tqdm
 
+from src.harmonize.product_identity import (
+    OfferRecord,
+    build_identity_clusters,
+    build_identity_evidence,
+    build_offer_records,
+    dedupe_observation_rows,
+    deterministic_canonical_name,
+    make_observation_id,
+    offer_sort_key,
+    structural_compatibility,
+)
+
 try:
     from dotenv import load_dotenv
 except Exception:  # pragma: no cover
@@ -62,8 +74,8 @@ OUTPUT_FILE = "matched_competitor_products.xlsx"
 EMBEDDING_DIR = "embeddings/product_matching"
 PROJECT_ROOT = Path(__file__).resolve().parent
 LOGO_FILE = str(PROJECT_ROOT / "assets" / "list_logo.png")
-ATTRIBUTE_MODEL = os.environ.get("DEEPSEEK_ATTRIBUTE_MODEL", os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro"))
-PAIR_JUDGE_MODEL = os.environ.get("DEEPSEEK_PAIR_JUDGE_MODEL", os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro"))
+ATTRIBUTE_MODEL = "deepseek-v4-pro"
+PAIR_JUDGE_MODEL = "deepseek-v4-pro"
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 EMBEDDING_MODEL = "qwen/qwen3-embedding-8b"
 OPENROUTER_EMBEDDING_URL = "https://openrouter.ai/api/v1/embeddings"
@@ -75,10 +87,10 @@ SIMILARITY_THRESHOLD = 0.0
 AUTO_MERGE_EXACT_THRESHOLD = 85
 AUTO_MERGE_CLOSE_THRESHOLD = 88
 PAIR_JUDGE_WORKERS = 25
-ATTRIBUTE_CACHE_VERSION = 3
-EMBEDDING_CACHE_VERSION = 3
-PAIR_CACHE_VERSION = 4
-SECOND_JUDGE_CACHE_VERSION = 1
+ATTRIBUTE_CACHE_VERSION = 4
+EMBEDDING_CACHE_VERSION = 4
+PAIR_CACHE_VERSION = 5
+SECOND_JUDGE_CACHE_VERSION = 2
 SAME_SUPPLIER_DEDUPE_SIMILARITY = 0.82
 
 SUPPLIER_ORDER = ["Metro", "Selgros", "Handelshof", "Edeka"]
@@ -96,40 +108,45 @@ def main() -> None:
     embedding_dir.mkdir(parents=True, exist_ok=True)
 
     df = load_products(input_path, args.max_products)
+    observation_audit = list(df.attrs.get("observation_dedupe_audit", []))
     print(f"Loaded rows: {len(pd.read_csv(input_path, dtype=str, keep_default_na=False))}")
     print(f"Relevant rows: {len(df)}")
     if df.empty:
         raise RuntimeError("No relevant rows found.")
 
     pair_model = args.pair_judge_model or args.deepseek_model or PAIR_JUDGE_MODEL
+    attribute_model = args.attribute_model or ATTRIBUTE_MODEL
+    require_deepseek_pro_model(pair_model, "pair judgement")
+    require_deepseek_pro_model(attribute_model, "attribute extraction")
     pair_client = make_deepseek_client(
         args.skip_llm,
         "pair judgement",
         model=pair_model,
         base_url=args.deepseek_base_url,
     )
+    attribute_client = make_deepseek_client(
+        args.skip_llm,
+        "attribute extraction",
+        model=attribute_model,
+        base_url=args.deepseek_base_url,
+    )
     if pair_client:
         print(f"DeepSeek pair judge model: {pair_client['model']}")
+    if attribute_client:
+        print(f"DeepSeek attribute model: {attribute_client['model']}")
     caches = Caches(embedding_dir)
 
-    attributes = build_attributes(df, caches, None, args.force_refresh_attributes, True)
+    attributes = build_attributes(
+        df,
+        caches,
+        attribute_client,
+        args.force_refresh_attributes,
+        args.skip_llm,
+    )
     print(f"Attributes extracted: {len(attributes)}")
 
     embeddings = build_embeddings(df, attributes, caches, args.force_refresh_embeddings, args.skip_llm)
     print(f"Embeddings loaded or created: {len(embeddings)}")
-
-    df, removed_same_supplier = dedupe_same_supplier_products(
-        df,
-        attributes,
-        embeddings,
-        caches,
-        pair_client,
-        args.force_refresh_pairs,
-        args.skip_llm,
-        args.pair_workers,
-        args.top_k,
-    )
-    print(f"Same-supplier duplicate products removed: {removed_same_supplier}")
 
     pinecone_store = None
     if not args.disable_pinecone and not args.skip_llm:
@@ -161,7 +178,7 @@ def main() -> None:
         args.skip_llm,
         args.pair_workers,
     )
-    print(f"Hard blocked pairs: {hard_blocked_count} (disabled; all vector candidates go to DeepSeek or cache)")
+    print(f"Hard structurally blocked pairs: {hard_blocked_count}")
     print(f"LLM judged pairs: {sum(1 for row in pair_rows if not row.get('hard_blocked'))}")
 
     pair_rows = second_round_judge_pairs(
@@ -182,7 +199,15 @@ def main() -> None:
     print(f"Review rows created: {len(review_rows)}")
 
     attribute_rows = build_attribute_debug_rows(df, attributes)
-    write_excel(output_path, matched_rows, review_rows, pair_rows, attribute_rows, Path(args.logo) if args.logo else None)
+    write_excel(
+        output_path,
+        matched_rows,
+        review_rows,
+        pair_rows,
+        attribute_rows,
+        Path(args.logo) if args.logo else None,
+        observation_audit=observation_audit,
+    )
     print(f"Excel written: {output_path}")
     if args.upload_onedrive:
         from upload_to_onedrive import upload_to_onedrive
@@ -210,9 +235,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-products", type=int)
     parser.add_argument("--skip-llm", action="store_true")
     parser.add_argument("--pair-workers", type=int, default=PAIR_JUDGE_WORKERS)
-    parser.add_argument("--deepseek-model", default=os.environ.get("DEEPSEEK_MODEL", PAIR_JUDGE_MODEL))
-    parser.add_argument("--attribute-model", default=os.environ.get("DEEPSEEK_ATTRIBUTE_MODEL", ""))
-    parser.add_argument("--pair-judge-model", default=os.environ.get("DEEPSEEK_PAIR_JUDGE_MODEL", ""))
+    parser.add_argument("--deepseek-model", default=PAIR_JUDGE_MODEL, choices=[PAIR_JUDGE_MODEL])
+    parser.add_argument("--attribute-model", default=ATTRIBUTE_MODEL, choices=[ATTRIBUTE_MODEL])
+    parser.add_argument("--pair-judge-model", default=PAIR_JUDGE_MODEL, choices=[PAIR_JUDGE_MODEL])
     parser.add_argument("--deepseek-base-url", default=os.environ.get("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL))
     parser.add_argument("--pinecone-index", default=PINECONE_INDEX_NAME)
     parser.add_argument("--disable-pinecone", action="store_true")
@@ -249,21 +274,37 @@ def load_products(input_path: Path, max_products: int | None) -> pd.DataFrame:
     if max_products:
         df = df.head(max_products).copy()
     df["supplier_norm"] = df["supplier"].map(normalize_supplier)
-    df["product_id"] = [
-        stable_product_id(row, idx)
-        for idx, row in df.iterrows()
-    ]
-    df["rich_product_text"] = df.apply(rich_product_text, axis=1)
+    deduped_rows, observation_audit = dedupe_observation_rows(df.to_dict("records"))
+    output_columns = list(dict.fromkeys([*df.columns, "observation_id", "product_id"]))
+    df = pd.DataFrame(deduped_rows, columns=output_columns)
+    if observation_audit:
+        print(f"Exact source observations removed: {len(observation_audit)}")
+    if df.empty:
+        df["rich_product_text"] = pd.Series(dtype=str)
+    else:
+        df["rich_product_text"] = df.apply(rich_product_text, axis=1)
+    df.attrs["observation_dedupe_audit"] = observation_audit
     return df
 
 
 def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     columns = [
         "supplier", "location", "product_name", "description", "category", "origin",
-        "brand", "product", "brand_product_confidence",
+        "product_name_original", "product_name_de", "brand", "product",
+        "brand_product_confidence", "certifications",
+        "product_family", "temperature_state", "processing_state", "calibre",
+        "source_brand", "brand_evidence", "brand_evidence_source",
+        "relevance_brand", "relevance_brand_source", "relevance_brand_evidence",
+        "relevance_policy_group", "relevance_route",
         "unit", "quantity", "price", "price_per_kg", "price_is_net", "price_gross",
+        "price_basis", "package_count", "package_size_value", "package_size_unit",
+        "total_content_value", "total_content_unit", "packaging_type", "packaging_raw",
         "price_tiers", "valid_from", "valid_to", "calendar_week", "year",
         "source_file", "source_title", "source_tab", "source_page",
+        "source_document_sha256", "source_item_id", "source_item_index",
+        "primary_extraction_model", "selected_extraction_model",
+        "quality_retry_attempted", "quality_retry_status", "quality_retry_model",
+        "quality_retry_issues", "extraction_schema_version",
         "extraction_confidence", "Relevant", "Relevant Time",
     ]
     for col in columns:
@@ -292,29 +333,40 @@ def normalize_supplier(value: str) -> str:
     return "Unknown"
 
 
-def stable_product_id(row: pd.Series, idx: int) -> str:
-    parts = [
-        get(row, "supplier"), get(row, "product_name"), get(row, "description"),
-        get(row, "price"), get(row, "quantity"), get(row, "source_file"),
-        get(row, "source_page"), str(idx),
-    ]
-    digest = hashlib.sha1("||".join(parts).encode("utf-8")).hexdigest()[:16]
-    return f"p_{digest}"
+def stable_product_id(row: pd.Series | dict[str, Any], idx: int | None = None) -> str:
+    """Backward-compatible alias for the row-order-independent observation ID."""
+    del idx
+    return make_observation_id(row)
 
 
 def rich_product_text(row: pd.Series) -> str:
     fields = [
         ("Supplier", "supplier_norm"),
         ("Category", "category"),
+        ("Product family", "product_family"),
         ("Product name", "product_name"),
+        ("Original product name", "product_name_original"),
+        ("German product name", "product_name_de"),
         ("Brand", "brand"),
         ("Product", "product"),
         ("Description", "description"),
         ("Origin", "origin"),
+        ("Temperature", "temperature_state"),
+        ("Processing", "processing_state"),
+        ("Calibre", "calibre"),
+        ("Certifications", "certifications"),
         ("Unit", "unit"),
         ("Quantity", "quantity"),
         ("Price", "price"),
         ("Price per kg", "price_per_kg"),
+        ("Price basis", "price_basis"),
+        ("Package count", "package_count"),
+        ("Package size", "package_size_value"),
+        ("Package size unit", "package_size_unit"),
+        ("Total content", "total_content_value"),
+        ("Total content unit", "total_content_unit"),
+        ("Packaging type", "packaging_type"),
+        ("Packaging raw", "packaging_raw"),
         ("Valid from", "valid_from"),
         ("Valid to", "valid_to"),
         ("Source", "source_file"),
@@ -377,6 +429,13 @@ def append_jsonl(path: Path, item: dict[str, Any]) -> None:
         handle.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 
+def require_deepseek_pro_model(model: str, purpose: str) -> None:
+    if model != PAIR_JUDGE_MODEL:
+        raise RuntimeError(
+            f"{purpose} must use {PAIR_JUDGE_MODEL}; got {model!r}."
+        )
+
+
 def make_deepseek_client(
     skip_llm: bool,
     purpose: str,
@@ -385,14 +444,18 @@ def make_deepseek_client(
 ) -> dict[str, str] | None:
     if skip_llm:
         return None
+    selected_model = model or (ATTRIBUTE_MODEL if purpose == "attribute extraction" else PAIR_JUDGE_MODEL)
+    require_deepseek_pro_model(selected_model, purpose)
     api_key = get_env_any("DEEPSEEK_API_KEY", "deepseek_api_key", "Deepseek_api_key")
     if not api_key:
-        print(f"DEEPSEEK_API_KEY missing; {purpose} will use rule-based fallback.")
-        return None
+        raise RuntimeError(
+            f"DEEPSEEK_API_KEY missing; {purpose} cannot use a generative fallback. "
+            "Use --skip-llm only for an explicit offline dry run."
+        )
     return {
         "api_key": api_key,
         "base_url": base_url or get_env_any("DEEPSEEK_BASE_URL", "deepseek_base_url") or DEEPSEEK_BASE_URL,
-        "model": model or (ATTRIBUTE_MODEL if purpose == "attribute extraction" else PAIR_JUDGE_MODEL),
+        "model": selected_model,
     }
 
 
@@ -490,13 +553,35 @@ def fallback_attributes(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     name = get(row, "product") or get(row, "product_name") or get(row, "rich_product_text")
     desc = get(row, "description")
     category = get(row, "category")
+    extracted_family = get(row, "product_family")
     text = f"{name} {desc}".casefold()
     base = infer_base_product(name, desc, category)
-    processing = infer_processing(text)
+    extracted_processing = get(row, "processing_state")
+    processing = (
+        extracted_processing
+        if extracted_processing and extracted_processing.casefold() != "unknown"
+        else infer_processing(text)
+    )
     variant = infer_variant(text)
-    packaging = infer_packaging(text, get(row, "unit"))
-    quantity_value = to_float(get(row, "quantity"))
-    unit = get(row, "unit") or "unknown"
+    structured_packaging = get(row, "packaging_type")
+    packaging = (
+        structured_packaging
+        if structured_packaging and structured_packaging.casefold() != "unknown"
+        else infer_packaging(text, get(row, "unit"))
+    )
+    structured_total = to_float(get(row, "total_content_value"))
+    structured_total_unit = get(row, "total_content_unit")
+    has_structured_total = (
+        structured_total is not None
+        and structured_total_unit
+        and structured_total_unit.casefold() != "unknown"
+    )
+    quantity_value = (
+        structured_total if has_structured_total else to_float(get(row, "quantity"))
+    )
+    unit = (
+        structured_total_unit if has_structured_total else get(row, "unit") or "unknown"
+    )
     normalized_kg = None
     normalized_liter = None
     if quantity_value is not None:
@@ -509,26 +594,39 @@ def fallback_attributes(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
             normalized_liter = quantity_value
         elif unit_cf in {"ml"}:
             normalized_liter = quantity_value / 1000
-    brand = get(row, "brand") or infer_brand(get(row, "product_name") or name)
+    brand = get(row, "relevance_brand") or get(row, "brand")
+    temperature = get(row, "temperature_state").strip().casefold()
+    if temperature in {"fresh", "chilled", "thawed"}:
+        fresh_or_frozen = temperature
+    elif temperature == "frozen":
+        fresh_or_frozen = "frozen"
+    elif re.search(r"\b(?:tk|tiefkühl\w*|tiefkuehl\w*|gefroren\w*|frozen)\b", text):
+        fresh_or_frozen = "frozen"
+    else:
+        fresh_or_frozen = "unknown"
     attr_list = [x for x in [base, variant, processing, get(row, "origin"), packaging] if x]
     return normalize_attribute_item(product_id, {
         "product_id": product_id,
         "schema_version": ATTRIBUTE_CACHE_VERSION,
         "base_product": base,
-        "product_family": category or "unknown",
+        "product_family": (
+            extracted_family
+            if extracted_family and extracted_family.casefold() != "unknown"
+            else category or "unknown"
+        ),
         "variant": variant,
         "processing": processing,
         "brand": brand,
         "origin": get(row, "origin") or None,
         "quality_class": infer_quality_class(text),
-        "calibre": infer_calibre(text),
+        "calibre": get(row, "calibre") or infer_calibre(text),
         "packaging": packaging,
         "quantity_value": quantity_value,
         "quantity_unit": unit or "unknown",
         "normalized_quantity_kg": normalized_kg,
         "normalized_quantity_liter": normalized_liter,
         "unit_basis": infer_unit_basis(unit),
-        "fresh_or_frozen": "frozen" if any(x in text for x in ["tk", "tiefkühl", "tiefkuehl", "gefroren", "frozen"]) else "fresh",
+        "fresh_or_frozen": fresh_or_frozen,
         "is_accessory_or_related_product": is_accessory(text),
         "commercially_relevant_attributes": attr_list,
         "do_not_merge_with": infer_do_not_merge(text),
@@ -1058,6 +1156,15 @@ def generate_candidate_pairs(
                     "similarity": round(float(sim), 4),
                     "candidate_source": source,
                 }
+    for candidate in generate_same_supplier_duplicate_candidates(
+        df,
+        attributes,
+        embeddings,
+        top_k,
+    ):
+        key = tuple(sorted([candidate["product_id_a"], candidate["product_id_b"]]))
+        if key not in candidate_map or candidate["similarity"] > candidate_map[key]["similarity"]:
+            candidate_map[key] = candidate
     return list(candidate_map.values())
 
 
@@ -1119,122 +1226,19 @@ def dedupe_same_supplier_products(
     pair_workers: int,
     top_k: int,
 ) -> tuple[pd.DataFrame, int]:
-    df, deterministic_removed = dedupe_exact_same_supplier_offers(df)
-    candidates = generate_same_supplier_duplicate_candidates(df, attributes, embeddings, top_k)
-    if not candidates:
-        return df, deterministic_removed
+    """Deprecated compatibility shim; observations/offers are never deleted here.
 
-    print(f"Same-supplier duplicate candidates: {len(candidates)}")
-    pair_rows, _ = judge_pairs(
-        candidates,
-        df,
-        attributes,
-        caches,
-        pair_client,
-        force,
-        skip_llm,
-        pair_workers,
-    )
-    duplicate_edges = [
-        row for row in pair_rows
-        if same_supplier_duplicate_decision(row)
-    ]
-    if not duplicate_edges:
-        return df, deterministic_removed
-
-    duplicate_groups = build_duplicate_groups(df["product_id"].tolist(), duplicate_edges)
-    row_by_id = {row["product_id"]: row for row in df.to_dict("records")}
-    keep_ids: set[str] = set()
-    remove_ids: set[str] = set()
-    for group in duplicate_groups:
-        products = [row_by_id[pid] for pid in group if pid in row_by_id]
-        if len(products) < 2:
-            continue
-        keeper = choose_longest_valid_offer(products)
-        keep_ids.add(keeper["product_id"])
-        remove_ids.update(p["product_id"] for p in products if p["product_id"] != keeper["product_id"])
-
-    if not remove_ids:
-        return df, deterministic_removed
-
-    kept = df.loc[~df["product_id"].isin(remove_ids)].copy().reset_index(drop=True)
-    print_same_supplier_dedupe_summary(row_by_id, keep_ids, remove_ids)
-    return kept, deterministic_removed + len(remove_ids)
+    Same-supplier rows now participate in identity clustering. Their commercial
+    differences are represented by distinct offer IDs instead of retaining only
+    the longest validity window.
+    """
+    del attributes, embeddings, caches, pair_client, force, skip_llm, pair_workers, top_k
+    return df.copy(), 0
 
 
 def dedupe_exact_same_supplier_offers(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    groups: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
-    for row in df.to_dict("records"):
-        key = exact_same_supplier_offer_key(row)
-        if key:
-            groups[key].append(row)
-
-    remove_ids: set[str] = set()
-    keep_ids: set[str] = set()
-    row_by_id = {row["product_id"]: row for row in df.to_dict("records")}
-    for group in groups.values():
-        if len(group) < 2:
-            continue
-        keeper = choose_longest_valid_offer(group)
-        keep_ids.add(keeper["product_id"])
-        remove_ids.update(row["product_id"] for row in group if row["product_id"] != keeper["product_id"])
-
-    if not remove_ids:
-        return df, 0
-
-    print_same_supplier_dedupe_summary(row_by_id, keep_ids, remove_ids)
-    kept = df.loc[~df["product_id"].isin(remove_ids)].copy().reset_index(drop=True)
-    return kept, len(remove_ids)
-
-
-def exact_same_supplier_offer_key(row: dict[str, Any]) -> tuple[str, ...] | None:
-    product = get(row, "product") or get(row, "product_name")
-    if not product.strip():
-        return None
-    return (
-        normalize_supplier(get(row, "supplier_norm") or get(row, "supplier")),
-        duplicate_key_text(get(row, "category")),
-        duplicate_key_text(get(row, "brand")),
-        duplicate_key_text(product),
-        duplicate_key_text(get(row, "description")),
-        duplicate_key_text(get(row, "origin")),
-        duplicate_key_number(get(row, "price")),
-        duplicate_key_number(get(row, "price_per_kg")),
-        duplicate_key_price_tiers(get(row, "price_tiers")),
-        get(row, "valid_from"),
-        get(row, "valid_to"),
-    )
-
-
-def duplicate_key_text(value: Any) -> str:
-    text = str(value or "").casefold()
-    return re.sub(r"[^a-z0-9äöüß]+", " ", text).strip()
-
-
-def duplicate_key_number(value: Any) -> str:
-    number = to_float(value)
-    return f"{number:.4f}" if number is not None else ""
-
-
-def duplicate_key_price_tiers(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    try:
-        tiers = json.loads(text)
-    except Exception:
-        return duplicate_key_text(text)
-    if not isinstance(tiers, list):
-        return duplicate_key_text(text)
-    normalized = []
-    for tier in tiers:
-        if not isinstance(tier, dict):
-            continue
-        normalized.append({
-            "min_qty": duplicate_key_number(tier.get("min_qty")),
-            "price": duplicate_key_number(tier.get("price")),
-        })
-    return json.dumps(sorted(normalized, key=lambda item: (item["min_qty"], item["price"])), sort_keys=True)
+    """Deprecated no-op retained for callers of the former destructive API."""
+    return df.copy(), 0
 
 
 def generate_same_supplier_duplicate_candidates(
@@ -1258,10 +1262,14 @@ def generate_same_supplier_duplicate_candidates(
                 if i == j:
                     continue
                 row_b = rows[j]
-                if same_source_offer(row_a, row_b):
-                    continue
                 sim = vector_similarity(embeddings[ids[i]], embeddings[ids[j]])
-                if sim >= SAME_SUPPLIER_DEDUPE_SIMILARITY or exact_name_key(row_a) == exact_name_key(row_b):
+                identity_a = build_identity_evidence(row_a, attributes[ids[i]])
+                identity_b = build_identity_evidence(row_b, attributes[ids[j]])
+                if (
+                    sim >= SAME_SUPPLIER_DEDUPE_SIMILARITY
+                    or exact_name_key(row_a) == exact_name_key(row_b)
+                    or identity_a.family_key == identity_b.family_key
+                ):
                     scored.append((sim, j, "same_supplier_vector_similarity"))
 
             for sim, j, source in sorted(scored, reverse=True)[:top_k]:
@@ -1290,13 +1298,6 @@ def generate_same_supplier_duplicate_candidates(
     return list(candidate_map.values())
 
 
-def same_source_offer(row_a: dict[str, Any], row_b: dict[str, Any]) -> bool:
-    return (
-        get(row_a, "source_file") == get(row_b, "source_file")
-        and get(row_a, "source_page") == get(row_b, "source_page")
-    )
-
-
 def exact_name_key(row: dict[str, Any]) -> str:
     text = " ".join([
         get(row, "supplier_norm"),
@@ -1307,59 +1308,6 @@ def exact_name_key(row: dict[str, Any]) -> str:
     return re.sub(r"[^a-z0-9äöüß]+", " ", text.casefold()).strip()
 
 
-def same_supplier_duplicate_decision(row: dict[str, Any]) -> bool:
-    decision = row.get("decision")
-    confidence = normalize_confidence(row.get("confidence"))
-    review = bool(row.get("should_human_review"))
-    return (
-        decision == "exact_match" and confidence >= 85
-    ) or (
-        decision == "close_comparable" and confidence >= 90 and not review
-    )
-
-
-def build_duplicate_groups(product_ids: list[str], edges: list[dict[str, Any]]) -> list[list[str]]:
-    parent = {pid: pid for pid in product_ids}
-
-    def find(x: str) -> str:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a: str, b: str) -> None:
-        if a not in parent or b not in parent:
-            return
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
-
-    for edge in edges:
-        union(edge["product_id_a"], edge["product_id_b"])
-
-    groups: dict[str, list[str]] = defaultdict(list)
-    for pid in product_ids:
-        groups[find(pid)].append(pid)
-    return [group for group in groups.values() if len(group) > 1]
-
-
-def choose_longest_valid_offer(products: list[dict[str, Any]]) -> dict[str, Any]:
-    return sorted(products, key=validity_rank, reverse=True)[0]
-
-
-def validity_rank(product: dict[str, Any]) -> tuple:
-    valid_from = parse_date(get(product, "valid_from"))
-    valid_to = parse_date(get(product, "valid_to"))
-    duration = (valid_to - valid_from).days if valid_from and valid_to else -1
-    return (
-        valid_to or date.min,
-        duration,
-        to_float(product.get("price_per_kg")) is not None,
-        to_float(product.get("price")) is not None,
-        -int(to_float(product.get("source_row_index")) or 0),
-    )
-
-
 def parse_date(value: Any) -> date | None:
     text = str(value or "").strip()
     if not text:
@@ -1368,20 +1316,6 @@ def parse_date(value: Any) -> date | None:
         return date.fromisoformat(text[:10])
     except ValueError:
         return None
-
-
-def print_same_supplier_dedupe_summary(row_by_id: dict[str, dict[str, Any]], keep_ids: set[str], remove_ids: set[str]) -> None:
-    examples = []
-    for removed_id in sorted(remove_ids)[:10]:
-        removed = row_by_id.get(removed_id, {})
-        examples.append(
-            f"{removed.get('supplier_norm')}: removed {display_product_name(removed)} "
-            f"valid {removed.get('valid_from')} to {removed.get('valid_to')}"
-        )
-    if examples:
-        print("Same-supplier duplicate examples:")
-        for example in examples:
-            print(f"- {example}")
 
 
 def vector_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -1411,8 +1345,19 @@ def judge_pairs(
     for idx, cand in enumerate(tqdm(candidates, desc="pairs prepare")):
         a_id, b_id = cand["product_id_a"], cand["product_id_b"]
         pair_key = make_pair_key(a_id, b_id)
-        hard_reasons: list[str] = []
-        soft_warnings: list[str] = []
+        compatibility = structural_compatibility(
+            row_by_id[a_id],
+            row_by_id[b_id],
+            attributes[a_id],
+            attributes[b_id],
+        )
+        hard_reasons = list(compatibility.reasons)
+        soft_warnings = list(compatibility.warnings)
+        if hard_reasons:
+            hard_blocked += 1
+            decision = structural_blocked_decision(pair_key, cand, hard_reasons)
+            out[idx] = pair_debug_row(cand, hard_reasons, soft_warnings, decision)
+            continue
         cached = caches.pairs.get(pair_key)
         cached_model_matches = (
             not pair_client
@@ -1452,6 +1397,30 @@ def judge_pairs(
     return [row for row in out if row is not None], hard_blocked
 
 
+def structural_blocked_decision(
+    pair_key: str,
+    cand: dict[str, Any],
+    reasons: list[str],
+) -> dict[str, Any]:
+    family_differs = any("protected product identity differs" in reason for reason in reasons)
+    return {
+        "pair_key": pair_key,
+        "schema_version": PAIR_CACHE_VERSION,
+        "product_id_a": cand["product_id_a"],
+        "product_id_b": cand["product_id_b"],
+        "decision": "same_family_not_comparable",
+        "family_relation": "different" if family_differs else "same",
+        "variant_relation": "different",
+        "confidence": 100,
+        "canonical_name": "",
+        "matching_attributes": [],
+        "conflicting_attributes": reasons,
+        "reason": "Hard structural conflict: " + "; ".join(reasons),
+        "should_human_review": False,
+        "hard_blocked": True,
+    }
+
+
 def second_round_judge_pairs(
     pair_rows: list[dict[str, Any]],
     df: pd.DataFrame,
@@ -1468,6 +1437,8 @@ def second_round_judge_pairs(
     row_by_id = {row["product_id"]: row for row in df.to_dict("records")}
     jobs = []
     for idx, row in enumerate(pair_rows):
+        if row.get("hard_blocked"):
+            continue
         if not needs_second_round(row):
             continue
         pair_key = make_pair_key(row["product_id_a"], row["product_id_b"])
@@ -1528,6 +1499,7 @@ SECOND_ROUND_PROMPT = """Du bist die zweite und finale Kontrollinstanz für ein 
 
 Ziel: möglichst vollautomatisch entscheiden, damit pro Woche höchstens 1-2 Fälle manuell offen bleiben.
 Du bekommst die erste LLM-Entscheidung und musst sie final überprüfen.
+Hard Structural Conflicts werden dir nicht zur Übersteuerung vorgelegt. Preis, Packung, Kaliber und Zeitraum sind Angebotsmerkmale; unterschiedliche Angebote desselben Suppliers bleiben erhalten.
 
 Erlaubte final_action:
 - MERGE: Die Produkte sind derselbe Artikel oder so klar derselbe Einkaufstyp, dass sie in eine Zeile gehören.
@@ -1628,6 +1600,8 @@ def second_round_fallback(pair_key: str, reason: str) -> dict[str, Any]:
 
 def apply_second_judgement(pair_row: dict[str, Any], judgement: dict[str, Any]) -> dict[str, Any]:
     row = dict(pair_row)
+    if row.get("hard_blocked"):
+        return row
     action = judgement.get("final_action")
     confidence = normalize_confidence(judgement.get("confidence"))
     reason = judgement.get("reason") or ""
@@ -1637,12 +1611,15 @@ def apply_second_judgement(pair_row: dict[str, Any], judgement: dict[str, Any]) 
 
     if action == "MERGE" and confidence >= 80:
         row["decision"] = "exact_match" if confidence >= 88 else "close_comparable"
+        row["family_relation"] = "same"
+        row["variant_relation"] = "same"
         row["confidence"] = confidence
         row["canonical_name"] = judgement.get("canonical_name") or row.get("canonical_name", "")
         row["reason"] = f"Second judge MERGE: {reason}"
         row["should_human_review"] = bool(judgement.get("manual_review_needed")) and confidence < 90
     elif action == "NO_MERGE" and confidence >= 80:
         row["decision"] = "no_match"
+        row["variant_relation"] = "different"
         row["confidence"] = confidence
         row["reason"] = f"Second judge NO_MERGE: {reason}"
         row["should_human_review"] = False
@@ -1663,6 +1640,8 @@ def pair_debug_row(
         "block_reasons": "; ".join(hard_reasons),
         "soft_warnings": "; ".join(soft_warnings),
         "decision": decision.get("decision", "no_match"),
+        "family_relation": decision.get("family_relation", "unknown"),
+        "variant_relation": decision.get("variant_relation", "unknown"),
         "confidence": normalize_confidence(decision.get("confidence")),
         "canonical_name": decision.get("canonical_name", ""),
         "reason": decision.get("reason", ""),
@@ -1723,7 +1702,14 @@ PAIR_PROMPT = """Du vergleichst Produkte aus deutschen Großhandels-Werbeprospek
 
 Entscheide, ob Produkt A und Produkt B in dieselbe Vergleichszeile gehören.
 Die Vektorsuche hat diese zwei Produkte nur als Kandidaten vorgeschlagen. Du bist die finale Entscheidung.
-Die Produkte können aus unterschiedlichen Wettbewerbern kommen oder vom selben Supplier aus unterschiedlichen Prospekten. Wenn es derselbe Supplier und derselbe Artikel ist, bewerte es trotzdem als exact_match; der technische Prozess behält danach nur das länger gültige Angebot.
+Die Produkte können aus unterschiedlichen Wettbewerbern oder vom selben Supplier stammen. Wenn es derselbe Supplier und derselbe Artikel ist, bewerte es trotzdem als exact_match. Unterschiedliche Preise, Packungen und Zeiträume bleiben anschließend als getrennte Angebote vollständig erhalten.
+
+Nicht übersteuerbare Strukturregeln:
+- Gefroren und nicht gefroren sind verschiedene Varianten.
+- Zwei unterschiedliche bekannte Herkünfte sind verschiedene Varianten; fehlende Herkunft ist kein Konflikt.
+- Duroc, Black Angus und vergleichbare benannte Rassen-/Premiumlinien sind eigene Varianten gegenüber generischen Produkten.
+- Kaliber, Preis, Packung und Zeitraum sind Angebotsmerkmale und kein Grund für eine andere Produktfamilie.
+- Red Snapper ist niemals Rotbarsch. Lachsforelle darf nicht zu Forelle Rot oder bloß Forelle werden.
 
 Antworte inhaltlich auf Deutsch. Gib aber das JSON-Schema exakt mit den vorgegebenen englischen Schlüsseln zurück.
 
@@ -1775,6 +1761,8 @@ Gib ausschließlich striktes JSON zurück:
   "product_id_a": "...",
   "product_id_b": "...",
   "decision": "exact_match",
+  "family_relation": "same",
+  "variant_relation": "same",
   "confidence": 0,
   "canonical_name": "...",
   "matching_attributes": [],
@@ -1853,7 +1841,20 @@ def call_deepseek_json(pair_client: dict[str, str], system_prompt: str, prompt: 
 
 
 def serializable_original(row: dict[str, Any]) -> dict[str, Any]:
-    keys = ["product_id", "supplier_norm", "product_name", "brand", "product", "brand_product_confidence", "description", "category", "origin", "unit", "quantity", "price", "price_per_kg", "valid_from", "valid_to", "source_file", "source_page"]
+    keys = [
+        "product_id", "observation_id", "supplier_norm", "product_name",
+        "product_name_original", "product_name_de", "brand", "product",
+        "brand_product_confidence", "certifications", "description", "category",
+        "product_family", "temperature_state", "processing_state", "origin", "calibre",
+        "unit", "quantity", "price", "price_per_kg", "price_basis",
+        "package_count", "package_size_value", "package_size_unit",
+        "total_content_value", "total_content_unit", "packaging_type", "packaging_raw",
+        "valid_from", "valid_to", "source_file", "source_title", "source_tab",
+        "source_page", "source_document_sha256", "source_item_id", "source_item_index",
+        "primary_extraction_model", "selected_extraction_model",
+        "quality_retry_attempted", "quality_retry_status", "quality_retry_model",
+        "quality_retry_issues", "extraction_schema_version",
+    ]
     return {key: row.get(key, "") for key in keys}
 
 
@@ -1861,12 +1862,22 @@ def normalize_pair_decision(pair_key: str, cand: dict[str, Any], data: dict[str,
     decision = data.get("decision", "no_match")
     if decision not in {"exact_match", "close_comparable", "same_family_not_comparable", "no_match"}:
         decision = "no_match"
+    family_relation = str(data.get("family_relation") or "").strip().casefold()
+    variant_relation = str(data.get("variant_relation") or "").strip().casefold()
+    if family_relation not in {"same", "different", "unknown"}:
+        family_relation = "same" if decision in {"exact_match", "close_comparable", "same_family_not_comparable"} else "unknown"
+    if variant_relation not in {"same", "different", "unknown"}:
+        variant_relation = "same" if decision in {"exact_match", "close_comparable"} else (
+            "different" if decision == "same_family_not_comparable" else "unknown"
+        )
     return {
         "pair_key": pair_key,
         "schema_version": PAIR_CACHE_VERSION,
         "product_id_a": cand["product_id_a"],
         "product_id_b": cand["product_id_b"],
         "decision": decision,
+        "family_relation": family_relation,
+        "variant_relation": variant_relation,
         "confidence": normalize_confidence(data.get("confidence")),
         "canonical_name": data.get("canonical_name", ""),
         "matching_attributes": data.get("matching_attributes", []) if isinstance(data.get("matching_attributes"), list) else [],
@@ -1883,6 +1894,8 @@ def conservative_no_match(pair_key: str, cand: dict[str, Any], reason: str) -> d
         "product_id_a": cand["product_id_a"],
         "product_id_b": cand["product_id_b"],
         "decision": "no_match",
+        "family_relation": "unknown",
+        "variant_relation": "unknown",
         "confidence": 0,
         "canonical_name": "",
         "matching_attributes": [],
@@ -1906,6 +1919,8 @@ def judge_pair_fallback(pair_key: str, cand: dict[str, Any], attr_a: dict[str, A
         "product_id_a": cand["product_id_a"],
         "product_id_b": cand["product_id_b"],
         "decision": decision,
+        "family_relation": "same" if decision in {"exact_match", "close_comparable"} else "unknown",
+        "variant_relation": "same" if decision in {"exact_match", "close_comparable"} else "unknown",
         "confidence": confidence,
         "canonical_name": "",
         "matching_attributes": [],
@@ -1916,48 +1931,39 @@ def judge_pair_fallback(pair_key: str, cand: dict[str, Any], attr_a: dict[str, A
 
 
 def build_clusters(df: pd.DataFrame, attributes: dict[str, dict[str, Any]], pair_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    ids = df["product_id"].tolist()
-    parent = {pid: pid for pid in ids}
-
-    def find(x: str) -> str:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a: str, b: str) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
-
-    for row in pair_rows:
-        if accepted_merge_edge(row):
-            union(row["product_id_a"], row["product_id_b"])
-
-    groups = defaultdict(list)
-    for pid in ids:
-        groups[find(pid)].append(pid)
-
-    pair_by_cluster = defaultdict(list)
-    for row in pair_rows:
-        if not accepted_merge_edge(row):
-            continue
-        root_a, root_b = find(row["product_id_a"]), find(row["product_id_b"])
-        if root_a == root_b:
-            pair_by_cluster[root_a].append(row)
-
-    clusters = []
-    for index, (root, product_ids) in enumerate(groups.items(), 1):
-        pair_edges = pair_by_cluster[root]
-        clusters.append({
-            "canonical_product_id": f"c_{index:05d}",
-            "product_ids": product_ids,
-            "pair_edges": pair_edges,
-        })
+    accepted_pairs = {
+        tuple(sorted((row["product_id_a"], row["product_id_b"]))): float(
+            normalize_confidence(row.get("confidence"))
+        )
+        for row in pair_rows
+        if accepted_merge_edge(row)
+    }
+    clusters = build_identity_clusters(
+        df.to_dict("records"),
+        attributes,
+        accepted_pairs=accepted_pairs,
+    )
+    for cluster in clusters:
+        members = set(cluster["product_ids"])
+        cluster["pair_edges"] = sorted(
+            [
+                row
+                for row in pair_rows
+                if accepted_merge_edge(row)
+                and row["product_id_a"] in members
+                and row["product_id_b"] in members
+            ],
+            key=lambda row: (
+                -normalize_confidence(row.get("confidence")),
+                make_pair_key(row["product_id_a"], row["product_id_b"]),
+            ),
+        )
     return clusters
 
 
 def accepted_merge_edge(row: dict[str, Any]) -> bool:
+    if row.get("hard_blocked"):
+        return False
     decision = row.get("decision")
     confidence = normalize_confidence(row.get("confidence"))
     review = bool(row.get("should_human_review"))
@@ -1970,20 +1976,28 @@ def accepted_merge_edge(row: dict[str, Any]) -> bool:
 
 def build_output_rows(df: pd.DataFrame, attributes: dict[str, dict[str, Any]], pair_rows: list[dict[str, Any]], clusters: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     row_by_id = {row["product_id"]: row for row in df.to_dict("records")}
-    pair_by_cluster_id = {cluster["canonical_product_id"]: cluster["pair_edges"] for cluster in clusters}
     matched_rows = []
     review_rows = []
     for cluster in clusters:
         products = [row_by_id[pid] for pid in cluster["product_ids"]]
         attrs = [attributes[pid] for pid in cluster["product_ids"]]
-        canonical_name = choose_canonical_name(cluster, attrs)
-        suppliers = defaultdict(list)
-        for product in products:
-            suppliers[product["supplier_norm"]].append(product)
+        canonical_name = cluster.get("canonical_product_name") or deterministic_canonical_name(products)
+        offers = build_offer_records(cluster["variant_id"], products)
+        suppliers: dict[str, list[OfferRecord]] = defaultdict(list)
+        for offer in offers:
+            suppliers[offer.product["supplier_norm"]].append(offer)
         review_needed, review_reasons = cluster_review_reasons(products, attrs, cluster["pair_edges"], suppliers)
         primary_attr = choose_primary_attr(attrs)
         matched = {
             "canonical_product_id": cluster["canonical_product_id"],
+            "product_family_id": cluster["product_family_id"],
+            "variant_id": cluster["variant_id"],
+            "offer_ids": "; ".join(offer.offer_id for offer in offers),
+            "offer_source_refs": json.dumps(
+                {offer.offer_id: offer.source_refs for offer in offers},
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
             "canonical_product_name": canonical_name,
             "category": most_common([get(p, "category") for p in products]),
             "product": canonical_name,
@@ -1999,33 +2013,32 @@ def build_output_rows(df: pd.DataFrame, attributes: dict[str, dict[str, Any]], p
             "match_confidence": cluster_confidence(cluster["pair_edges"]),
             "review_needed": str(bool(review_needed)).upper(),
             "match_reason": "; ".join(review_reasons) if review_reasons else "single product or accepted exact match",
+            "identity_warnings": "; ".join(cluster.get("identity_warnings", [])),
         }
         for supplier in SUPPLIER_ORDER:
-            matched[supplier] = "\n\n".join(format_offer_cell(p) for p in suppliers.get(supplier, []))
-            matched[f"{supplier}_short"] = "\n".join(format_offer_cell_short(p) for p in suppliers.get(supplier, []))
+            supplier_offers = sorted(suppliers.get(supplier, []), key=offer_sort_key)
+            matched[supplier] = "\n\n".join(
+                format_offer_cell(offer.product) for offer in supplier_offers
+            )
+            matched[f"{supplier}_short"] = "\n\n".join(
+                format_offer_cell_short(offer.product) for offer in supplier_offers
+            )
         matched_rows.append(matched)
         if review_needed:
             review_rows.append(make_review_row(cluster, canonical_name, products, review_reasons, cluster["pair_edges"]))
     return matched_rows, review_rows
 
 
-def choose_canonical_name(cluster: dict[str, Any], attrs: list[dict[str, Any]]) -> str:
-    best_pair = None
-    for edge in cluster["pair_edges"]:
-        if edge.get("canonical_name") and (
-            best_pair is None
-            or normalize_confidence(edge.get("confidence")) > normalize_confidence(best_pair.get("confidence"))
-        ):
-            best_pair = edge
-    if best_pair:
-        return best_pair["canonical_name"]
-    attr = choose_primary_attr(attrs)
-    parts = [
-        attr.get("base_product"), attr.get("variant"), attr.get("processing"),
-        attr.get("quality_class"), attr.get("origin"), attr.get("packaging"),
-        quantity_label(attr),
-    ]
-    return title_case(" ".join(str(p) for p in parts if p))
+def choose_canonical_name(
+    cluster: dict[str, Any],
+    attrs: list[dict[str, Any]],
+    products: list[dict[str, Any]] | None = None,
+) -> str:
+    """Return only a deterministic source-backed name; never trust an edge proposal."""
+    del attrs
+    if products:
+        return deterministic_canonical_name(products)
+    return str(cluster.get("canonical_product_name") or "Unknown")
 
 
 def choose_primary_attr(attrs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2055,8 +2068,6 @@ def cluster_confidence(edges: list[dict[str, Any]]) -> int:
 
 def cluster_review_reasons(products: list[dict[str, Any]], attrs: list[dict[str, Any]], edges: list[dict[str, Any]], suppliers: dict[str, list[dict[str, Any]]]) -> tuple[bool, list[str]]:
     reasons = []
-    if any(len(items) > 1 for items in suppliers.values()):
-        reasons.append("multiple products from same supplier")
     if any(e.get("decision") == "close_comparable" and e.get("should_human_review") for e in edges):
         reasons.append("close comparable match needs review")
     if any(normalize_confidence(e.get("confidence")) < 80 and e.get("should_human_review") for e in edges):
@@ -2105,6 +2116,7 @@ def format_offer_cell(product: dict[str, Any]) -> str:
         f"Preis/kg: {price_per_kg_label(product)}",
         f"Gültig: {valid_label(product)}",
         f"Menge: {amount_label(product)}",
+        f"Kaliber: {product.get('calibre') or 'unknown'}",
         f"Produkt: {display_product_name(product) or 'unknown'}",
         f"Marke: {product.get('brand') or 'unknown'}",
         f"Beschreibung: {wrap_excel_text(product.get('description'), FINAL_TEXT_WRAP_WIDTH) or 'unknown'}",
@@ -2119,10 +2131,12 @@ def format_offer_cell_short(product: dict[str, Any]) -> str:
     amount = amount_label(product)
     valid = short_valid_label(product)
     tiers = price_tiers_label(product)
+    calibre = str(product.get("calibre") or "").strip()
     parts = [
         price,
         amount if amount != "unknown" else "",
         tiers.replace(" EUR", " €") if tiers != "unknown" else "",
+        f"Kaliber: {calibre}" if calibre else "",
         valid,
     ]
     return "\n".join(part for part in parts if part and part != "unknown")
@@ -2134,10 +2148,113 @@ def display_product_name(product: dict[str, Any]) -> str:
 
 
 def amount_label(product: dict[str, Any]) -> str:
+    structured_fields = (
+        "package_count",
+        "package_size_value",
+        "package_size_unit",
+        "total_content_value",
+        "total_content_unit",
+        "packaging_type",
+    )
+    has_structured_packaging = any(
+        str(product.get(field) or "").strip().casefold()
+        not in {"", "none", "null", "nan", "unknown"}
+        for field in structured_fields
+    )
+    if has_structured_packaging:
+        count = to_float(product.get("package_count"))
+        size = structured_content_label(
+            product.get("package_size_value"),
+            product.get("package_size_unit"),
+        )
+        total = structured_content_label(
+            product.get("total_content_value"),
+            product.get("total_content_unit"),
+        )
+        packaging = packaging_type_label(product.get("packaging_type"))
+
+        if count is not None and count > 1 and size:
+            parts = [f"{format_german_number(count)} × {size}"]
+            if total:
+                parts.append(f"gesamt {total}")
+            if packaging:
+                parts.append(packaging)
+            return " · ".join(parts)
+
+        parts: list[str] = []
+        if packaging:
+            parts.append(
+                f"{format_german_number(count)} {packaging}"
+                if count is not None
+                else packaging
+            )
+        elif count is not None and size:
+            parts.append(f"{format_german_number(count)} × {size}")
+        elif count is not None:
+            parts.append(format_german_number(count))
+
+        content = total or size
+        if content and content not in parts:
+            parts.append(content)
+        if parts:
+            return " · ".join(parts)
+
     quantity, unit = product.get("quantity"), product.get("unit")
     quantity_text = clean_amount_value(quantity)
     unit_text = clean_amount_value(unit)
     return f"{quantity_text} {unit_text}".strip() if quantity_text or unit_text else "unknown"
+
+
+def structured_content_label(value: Any, unit: Any) -> str:
+    number = to_float(value)
+    normalized_unit = str(unit or "").strip().casefold()
+    if number is None or normalized_unit in {"", "unknown", "none", "null", "nan"}:
+        return ""
+    if normalized_unit in {"g", "gramm"} and number >= 1000:
+        return f"{format_german_number(number / 1000)} kg"
+    if normalized_unit == "ml" and number >= 1000:
+        return f"{format_german_number(number / 1000)} l"
+    unit_label = {
+        "gramm": "g",
+        "kilogramm": "kg",
+        "liter": "l",
+        "litre": "l",
+        "piece": "Stück",
+        "stueck": "Stück",
+        "stück": "Stück",
+    }.get(normalized_unit, normalized_unit)
+    return f"{format_german_number(number)} {unit_label}".strip()
+
+
+def packaging_type_label(value: Any) -> str:
+    normalized = str(value or "").strip().casefold()
+    if normalized in {"", "unknown", "none", "null", "nan"}:
+        return ""
+    return {
+        "bag": "Beutel",
+        "beutel": "Beutel",
+        "pack": "Packung",
+        "packung": "Packung",
+        "box": "Karton",
+        "karton": "Karton",
+        "crate": "Kiste",
+        "kiste": "Kiste",
+        "basket": "Korb",
+        "korb": "Korb",
+        "tray": "Schale",
+        "schale": "Schale",
+        "bucket": "Eimer",
+        "eimer": "Eimer",
+        "bottle": "Flasche",
+        "flasche": "Flasche",
+        "can": "Dose",
+        "dose": "Dose",
+        "bundle": "Bund",
+        "bund": "Bund",
+        "piece": "Stück",
+        "stueck": "Stück",
+        "stück": "Stück",
+    }.get(normalized, str(value).strip())
 
 
 def clean_amount_value(value: Any) -> str:
@@ -2406,7 +2523,15 @@ COUNTRY_CODE_BY_ALIAS = {
 COUNTRY_ALIAS_PATTERNS = sorted(COUNTRY_CODE_BY_ALIAS.items(), key=lambda item: len(item[0]), reverse=True)
 
 
-def write_excel(output_path: Path, matched_rows: list[dict[str, Any]], review_rows: list[dict[str, Any]], pair_rows: list[dict[str, Any]], attribute_rows: list[dict[str, Any]], logo_path: Path | None = None) -> None:
+def write_excel(
+    output_path: Path,
+    matched_rows: list[dict[str, Any]],
+    review_rows: list[dict[str, Any]],
+    pair_rows: list[dict[str, Any]],
+    attribute_rows: list[dict[str, Any]],
+    logo_path: Path | None = None,
+    observation_audit: list[dict[str, Any]] | None = None,
+) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True) if output_path.parent != Path(".") else None
     wb = Workbook()
     ws = wb.active
@@ -2428,6 +2553,8 @@ def write_excel(output_path: Path, matched_rows: list[dict[str, Any]], review_ro
     write_sheet(wb.create_sheet("pair_debug"), pair_rows, PAIR_COLUMNS)
     attr_columns = list(attribute_rows[0].keys()) if attribute_rows else []
     write_sheet(wb.create_sheet("attribute_debug"), attribute_rows, attr_columns)
+    audit_rows = list(observation_audit or [])
+    write_sheet(wb.create_sheet("observation_dedupe"), audit_rows, OBSERVATION_AUDIT_COLUMNS)
     wb.save(output_path)
 
 
@@ -2447,7 +2574,7 @@ def build_final_output_rows(matched_rows: list[dict[str, Any]], short: bool = Fa
         suffix = "_short" if short else ""
         rows.append({
             "Kategorie": category_label(row.get("category", "")),
-            "Produkt": product_name_from_offer_cells(row),
+            "Produkt": str(row.get("canonical_product_name") or row.get("product") or "").strip(),
             "_sort_brand": row.get("brand", ""),
             "Beschreibung": final_output_description(row.get("description", ""), row.get("brand", "")),
             "Herkunft": origin_country_codes(row.get("origin", "")),
@@ -2511,6 +2638,9 @@ def add_origin_codes(text: str, codes: list[str]) -> None:
 
 
 def product_name_from_offer_cells(row: dict[str, Any]) -> str:
+    canonical = str(row.get("canonical_product_name") or row.get("product") or "").strip()
+    if canonical:
+        return canonical
     for supplier in SUPPLIER_ORDER:
         offer_text = str(row.get(supplier, "") or "")
         for line in offer_text.splitlines():
@@ -2518,7 +2648,7 @@ def product_name_from_offer_cells(row: dict[str, Any]) -> str:
                 product_name = line.removeprefix("Produkt:").strip()
                 if product_name:
                     return product_name
-    return str(row.get("product") or row.get("canonical_product_name") or "").strip()
+    return ""
 
 
 def category_label(value: Any) -> str:
@@ -2732,9 +2862,10 @@ def prepare_logo_image(logo_path: Path | None) -> Path | None:
 
 
 MATCHED_COLUMNS = [
-    "canonical_product_id", "canonical_product_name", "category", "product", "brand", "description", "base_product",
+    "canonical_product_id", "product_family_id", "variant_id", "offer_ids", "offer_source_refs",
+    "canonical_product_name", "category", "product", "brand", "description", "base_product",
     "variant", "processing", "quality_class", "origin", "packaging", "unit_basis",
-    "match_confidence", "review_needed", "match_reason",
+    "match_confidence", "review_needed", "match_reason", "identity_warnings",
     "Metro", "Selgros", "Handelshof", "Edeka",
 ]
 
@@ -2752,8 +2883,13 @@ REVIEW_COLUMNS = [
 PAIR_COLUMNS = [
     "product_id_a", "product_id_b", "supplier_a", "supplier_b", "name_a", "name_b",
     "similarity", "hard_blocked", "block_reasons", "soft_warnings", "decision",
-    "confidence", "canonical_name", "reason", "conflicting_attributes",
+    "family_relation", "variant_relation", "confidence", "canonical_name", "reason", "conflicting_attributes",
     "should_human_review", "second_judge_action", "second_judge_confidence", "second_judge_reason",
+]
+
+OBSERVATION_AUDIT_COLUMNS = [
+    "removed_observation_id", "kept_observation_id", "reason",
+    "removed_source_row_index", "kept_source_row_index",
 ]
 
 

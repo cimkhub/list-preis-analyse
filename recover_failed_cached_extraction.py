@@ -20,18 +20,20 @@ from src.extract.cached_batch import (
     get_scraper,
     load_downloaded_documents,
 )
+from src.extract.vision import file_sha256
 from src.models import RawProduct
 from src.report.parsed_csv import (
     PARSED_CSV_FIELDS,
     find_existing_supplier_parsed_csv_path,
     get_combined_parsed_csv_path,
     get_supplier_parsed_csv_path,
+    serialize_product_row,
 )
 from src.utils.logging_setup import get_run_id, log_event, setup_logging
 
 
 FAILED_PAGE_RE = re.compile(
-    r"Failed to analyze images/(?P<supplier>[^/]+)/(?P<year>\d+)/KW(?P<week>\d+)/(?P<stem>.+?)/page-[^ ]+ after 3 attempts"
+    r"Failed to analyze images/(?P<supplier>[^/]+)/(?P<year>\d+)/KW(?P<week>\d+)/(?P<stem>.+?)/page-[^ ]+ after \d+ attempts"
 )
 
 
@@ -112,21 +114,62 @@ def build_document_index(config, selected_suppliers: list[str], week: int, year:
     return index
 
 
-def serialize_product(product: RawProduct) -> dict[str, str]:
-    row = product.model_dump(mode="json")
-    row["price_tiers"] = (
-        json.dumps(row["price_tiers"], ensure_ascii=False)
-        if row.get("price_tiers") is not None
-        else ""
-    )
-    return row
-
-
 def load_csv_rows(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         return []
     with path.open("r", newline="", encoding="utf-8-sig") as handle:
         return list(csv.DictReader(handle))
+
+
+def extraction_outcome_manifest_path(document, images_dir: str = "images") -> Path:
+    year_part = str(document.year or "unknown")
+    week_part = (
+        f"KW{document.calendar_week:02d}"
+        if document.calendar_week is not None
+        else "KW00"
+    )
+    return (
+        Path(images_dir)
+        / document.supplier
+        / year_part
+        / week_part
+        / Path(document.file_path or "unknown").stem
+        / "extraction_outcomes.jsonl"
+    )
+
+
+def document_extraction_is_complete(document, images_dir: str = "images") -> bool:
+    """Fail closed unless every rendered page has a complete P6 outcome."""
+    manifest_path = extraction_outcome_manifest_path(document, images_dir)
+    if not manifest_path.is_file() or not document.file_path:
+        return False
+    expected_hash = file_sha256(document.file_path)
+    if not expected_hash:
+        return False
+
+    records: list[dict] = []
+    try:
+        for line in manifest_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    return False
+                records.append(record)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+
+    if not records:
+        return False
+    pages = [record.get("source_page") for record in records]
+    if any(not isinstance(page, int) or page <= 0 for page in pages):
+        return False
+    if len(set(pages)) != len(pages):
+        return False
+    return all(
+        record.get("page_complete") is True
+        and record.get("source_document_sha256") == expected_hash
+        for record in records
+    )
 
 
 def sort_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -253,6 +296,21 @@ def main() -> None:
         )
         scraper = get_scraper(document.supplier, supplier_configs[document.supplier])
         products = scraper.extract_products(document)
+        if not products:
+            logger.error(
+                "Repair produced no accepted products for %s; keeping existing source rows",
+                document_name,
+            )
+            continue
+        if not document_extraction_is_complete(
+            document,
+            config.storage.images_dir,
+        ):
+            logger.error(
+                "Repair outcome is incomplete for %s; keeping all existing source rows",
+                document_name,
+            )
+            continue
         group_key = (document.supplier, document.calendar_week, document.year)
         replaced_source_files_by_group[group_key].add(document.file_path)
         new_products_by_group[group_key].extend(products)
@@ -270,7 +328,10 @@ def main() -> None:
         supplier_path = find_existing_supplier_parsed_csv_path(supplier, week, year, config.storage.parsed_dir)
         existing_rows = load_csv_rows(supplier_path)
         kept_rows = [row for row in existing_rows if row.get("source_file") not in source_files]
-        new_rows = [serialize_product(product) for product in new_products_by_group[group_key]]
+        new_rows = [
+            serialize_product_row(product)
+            for product in new_products_by_group[group_key]
+        ]
         merged_rows = sort_rows(kept_rows + new_rows)
         output_path = get_supplier_parsed_csv_path(supplier, week, year, config.storage.parsed_dir)
         write_csv_rows(output_path, merged_rows)

@@ -20,9 +20,18 @@ from src.config import load_config
 from src.convert.pdf_to_images import pdf_to_images
 from src.extract.cached_batch import CachedExtractionTarget, load_downloaded_documents
 from src.extract.text_extract import classify_category
-from src.extract.vision import _raw_items_to_products, configure_gemini, extract_products_from_image
-from src.report.parsed_csv import PARSED_CSV_FIELDS
-from src.utils.logging_setup import setup_logging
+from src.extract.vision import (
+    QUALITY_RETRY_MODEL,
+    PageExtractionOutcome,
+    _raw_items_to_products,
+    apply_quality_retry_once,
+    configure_gemini,
+    extraction_quality_issues,
+    extract_products_from_image,
+    file_sha256,
+)
+from src.report.parsed_csv import PARSED_CSV_FIELDS, serialize_product_row
+from src.utils.logging_setup import log_event, setup_logging
 
 
 ROOT = Path(__file__).resolve().parent
@@ -60,6 +69,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=str, default="config.yaml", help="Config file path")
 
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--worker-mode",
+        choices=["primary", "quality_retry"],
+        default="primary",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--quality-issues-json", type=str, help=argparse.SUPPRESS)
     parser.add_argument("--page-image", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--supplier", type=str, help=argparse.SUPPRESS)
     parser.add_argument("--source-file", type=str, help=argparse.SUPPRESS)
@@ -154,33 +170,44 @@ def run_worker(args) -> None:
         min_request_interval_seconds=config.vision_api.min_request_interval_seconds,
     )
 
-    raw_items = extract_products_from_image(str(args.page_image), supplier=args.supplier)
-    products = _raw_items_to_products(
-        raw_items,
-        supplier=args.supplier,
-        source_file=args.source_file or "",
-        source_page=page_number_from_path(args.page_image),
-        valid_from=args.valid_from,
-        valid_to=args.valid_to,
-        calendar_week=args.week,
-        year=args.year,
-        location=args.location,
-        source_title=args.title,
-        source_tab=args.tab,
-        fallback_category=args.fallback_category,
-    )
-
-    rows = []
-    for product in products:
-        row = product.model_dump(mode="json")
-        row["price_tiers"] = (
-            json.dumps(row["price_tiers"], ensure_ascii=False)
-            if row.get("price_tiers") is not None
-            else ""
+    worker_mode = getattr(args, "worker_mode", "primary")
+    if worker_mode == "quality_retry":
+        try:
+            quality_issues = json.loads(args.quality_issues_json or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            quality_issues = []
+        raw_items = extract_products_from_image(
+            str(args.page_image),
+            supplier=args.supplier,
+            model_name=QUALITY_RETRY_MODEL,
+            max_retries=1,
+            temperature=None,
+            operation="product_extraction_quality_retry",
+            quality_issues=quality_issues,
         )
-        rows.append({field: row.get(field, "") for field in PARSED_CSV_FIELDS})
+        selected_model = QUALITY_RETRY_MODEL
+    else:
+        raw_items = extract_products_from_image(
+            str(args.page_image),
+            supplier=args.supplier,
+            model_name=config.vision_api.model,
+            max_retries=config.vision_api.max_retries,
+            temperature=config.vision_api.temperature,
+            operation="product_extraction",
+        )
+        selected_model = config.vision_api.model
 
-    sys.stdout.write(json.dumps(rows, ensure_ascii=False))
+    sys.stdout.write(
+        json.dumps(
+            {
+                "status": "ok" if raw_items is not None else "failed",
+                "items": raw_items,
+                "model_name": selected_model,
+                "worker_mode": worker_mode,
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 def run_page_subprocess(
@@ -191,11 +218,15 @@ def run_page_subprocess(
     fallback_category: str | None,
     timeout_seconds: int,
     retries: int,
-) -> list[dict[str, str]]:
+    worker_mode: str = "primary",
+    quality_issues: list[str] | None = None,
+) -> list[dict] | None:
     command = [
         sys.executable,
         str(script_path),
         "--worker",
+        "--worker-mode",
+        worker_mode,
         "--config",
         config_path,
         "--page-image",
@@ -221,9 +252,17 @@ def run_page_subprocess(
         command.extend(["--valid-to", document.valid_to.isoformat()])
     if fallback_category:
         command.extend(["--fallback-category", fallback_category])
+    if worker_mode == "quality_retry":
+        command.extend(
+            [
+                "--quality-issues-json",
+                json.dumps(quality_issues or [], ensure_ascii=False),
+            ]
+        )
 
     last_error = None
-    for attempt in range(1, retries + 1):
+    attempt_limit = max(1, retries) if worker_mode == "primary" else 1
+    for attempt in range(1, attempt_limit + 1):
         try:
             result = subprocess.run(
                 command,
@@ -234,15 +273,77 @@ def run_page_subprocess(
                 timeout=timeout_seconds,
                 check=True,
             )
-            return json.loads(result.stdout or "[]")
+            payload = json.loads(result.stdout or "{}")
+            if isinstance(payload, list):
+                # Compatibility with pre-P6 worker output.
+                return payload
+            if not isinstance(payload, dict) or payload.get("status") != "ok":
+                raise RuntimeError("worker returned failed extraction status")
+            items = payload.get("items")
+            if not isinstance(items, list):
+                raise RuntimeError("worker returned invalid items payload")
+            return items
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             print(
-                f"Retry {attempt}/{retries} failed for {page_image.name}: {exc}",
+                f"{worker_mode} attempt {attempt}/{attempt_limit} failed for {page_image.name}: {exc}",
                 flush=True,
             )
 
-    raise RuntimeError(f"Page extraction failed for {page_image.name}: {last_error}")
+    print(
+        f"{worker_mode} extraction failed for {page_image.name}: {last_error}",
+        flush=True,
+    )
+    return None
+
+
+def apply_single_page_quality_retry(
+    *,
+    primary_items: list[dict] | None,
+    primary_model: str,
+    script_path: Path,
+    config_path: str,
+    page_image: Path,
+    document,
+    fallback_category: str | None,
+    timeout_seconds: int,
+) -> PageExtractionOutcome:
+    """Use the shared coordinator while isolating the one retry in a subprocess."""
+
+    def quality_retry_executor(_image_path, _supplier, **kwargs):
+        return run_page_subprocess(
+            script_path,
+            config_path,
+            page_image,
+            document,
+            fallback_category,
+            timeout_seconds,
+            1,
+            worker_mode="quality_retry",
+            quality_issues=kwargs.get("quality_issues") or [],
+        )
+
+    return apply_quality_retry_once(
+        primary_items,
+        image_path=str(page_image),
+        supplier=document.supplier,
+        primary_model=primary_model,
+        retry_executor=quality_retry_executor,
+    )
+
+
+def write_page_outcome_manifest(
+    csv_path: Path,
+    records: list[dict],
+) -> Path:
+    manifest_path = csv_path.with_suffix(".extraction_outcomes.jsonl")
+    tmp_path = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    tmp_path.replace(manifest_path)
+    return manifest_path
 
 
 def run_parent(args) -> None:
@@ -262,9 +363,12 @@ def run_parent(args) -> None:
     fallback_category = classify_category(document.category) if document.category else None
     output_csv = args.output.resolve() if args.output else default_output_path(document)
     script_path = Path(__file__).resolve()
+    source_document_sha256 = file_sha256(pdf_path)
+    if not source_document_sha256:
+        raise RuntimeError(f"Could not hash source PDF: {pdf_path}")
 
     print(f"Extracting {len(image_paths)} pages from {pdf_path.name}", flush=True)
-    rows_by_page: dict[int, list[dict[str, str]]] = {}
+    primary_items_by_page: dict[int, list[dict] | None] = {}
 
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
         futures = {
@@ -284,10 +388,74 @@ def run_parent(args) -> None:
         completed = 0
         for future in as_completed(futures):
             page_image = futures[future]
-            page_rows = future.result()
-            rows_by_page[page_number_from_path(page_image)] = page_rows
+            primary_items = future.result()
+            primary_items_by_page[page_number_from_path(page_image)] = primary_items
             completed += 1
-            print(f"Processed {completed}/{len(image_paths)} pages", flush=True)
+            print(f"Primary processed {completed}/{len(image_paths)} pages", flush=True)
+
+    outcomes_by_page: dict[int, PageExtractionOutcome] = {}
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+        outcome_futures = {
+            executor.submit(
+                apply_single_page_quality_retry,
+                primary_items=primary_items_by_page.get(page_number_from_path(page_image)),
+                primary_model=config.vision_api.model,
+                script_path=script_path,
+                config_path=args.config,
+                page_image=page_image,
+                document=document,
+                fallback_category=fallback_category,
+                timeout_seconds=args.page_timeout,
+            ): page_image
+            for page_image in image_paths
+        }
+        for future in as_completed(outcome_futures):
+            page_image = outcome_futures[future]
+            page_number = page_number_from_path(page_image)
+            outcomes_by_page[page_number] = future.result()
+
+    rows_by_page: dict[int, list[dict[str, object]]] = {}
+    manifest_records: list[dict] = []
+    image_by_page = {page_number_from_path(path): path for path in image_paths}
+    for page_num in sorted(image_by_page):
+        page_image = image_by_page[page_num]
+        outcome = outcomes_by_page[page_num]
+        products = _raw_items_to_products(
+            outcome.selected_items,
+            supplier=document.supplier,
+            source_file=str(document.file_path or pdf_path),
+            source_page=page_num,
+            valid_from=document.valid_from,
+            valid_to=document.valid_to,
+            calendar_week=document.calendar_week,
+            year=document.year,
+            location=document.location,
+            source_title=document.title,
+            source_tab=document.tab,
+            fallback_category=fallback_category,
+            source_document_sha256=source_document_sha256,
+            extraction_outcome=outcome,
+        )
+        rows_by_page[page_num] = [serialize_product_row(product) for product in products]
+        manifest_record = outcome.to_manifest_record(
+            supplier=document.supplier,
+            source_file=str(document.file_path or pdf_path),
+            source_document_sha256=source_document_sha256,
+            source_page=page_num,
+            image_path=str(page_image),
+        )
+        manifest_record["accepted_product_count"] = len(products)
+        manifest_record["page_complete"] = bool(outcome.selected_items) and (
+            len(products) == len(outcome.selected_items)
+        ) and not extraction_quality_issues(outcome.selected_items)
+        manifest_records.append(manifest_record)
+        log_event(
+            logger,
+            f"Single-PDF page outcome recorded for page {page_num}",
+            event="vision_page_outcome",
+            status=outcome.quality_retry_status,
+            **manifest_record,
+        )
 
     all_rows: list[dict[str, str]] = []
     for page_num in sorted(rows_by_page):
@@ -295,9 +463,11 @@ def run_parent(args) -> None:
 
     write_csv(output_csv, all_rows)
     output_xlsx = write_xlsx(output_csv)
+    outcome_manifest = write_page_outcome_manifest(output_csv, manifest_records)
     logger.info("Standalone single-PDF extraction completed: %s (%d rows)", output_csv, len(all_rows))
     print(f"CSV={output_csv}")
     print(f"XLSX={output_xlsx}")
+    print(f"OUTCOMES={outcome_manifest}")
     print(f"ROWS={len(all_rows)}")
 
 

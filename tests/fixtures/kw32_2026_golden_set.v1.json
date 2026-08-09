@@ -1,0 +1,1229 @@
+{
+  "schema_version": "1.0",
+  "fixture_id": "kw32_2026_customer_feedback",
+  "fixture_version": 1,
+  "calendar_week": 32,
+  "year": 2026,
+  "fixture_mode": "expected_policy",
+  "raw_snapshot_available": false,
+  "provenance": {
+    "basis": "Customer-provided comparison of the old and new KW32 workbooks plus previously confirmed customer rules",
+    "limitations": "The actual KW32 source rows and PDFs are not stored in this repository. Reported names, prices and row references are source references only; no missing production fields were invented.",
+    "intended_use": "Regression contract for relevance, product family, variant, offer identity and safe name normalization"
+  },
+  "field_aliases": {
+    "source_product_name": [
+      "source_product_name",
+      "product_name_original",
+      "original_product_name",
+      "raw_product_name",
+      "product_name"
+    ],
+    "normalized_product_name": [
+      "normalized_product_name",
+      "canonical_product_name",
+      "product",
+      "Produkt",
+      "product_name"
+    ],
+    "relevance": [
+      "relevance",
+      "relevance_decision",
+      "Relevant",
+      "is_relevant"
+    ],
+    "family_id": [
+      "product_family_id",
+      "family_id",
+      "product_family"
+    ],
+    "variant_id": [
+      "variant_id",
+      "product_variant_id"
+    ],
+    "offer_id": [
+      "offer_id",
+      "source_offer_id"
+    ],
+    "supplier": [
+      "supplier",
+      "supplier_norm",
+      "Händler",
+      "Haendler"
+    ],
+    "category": [
+      "category",
+      "Kategorie"
+    ],
+    "description": [
+      "description",
+      "Beschreibung"
+    ],
+    "origin": [
+      "origin",
+      "Herkunft"
+    ],
+    "price": [
+      "price_value",
+      "price",
+      "Preis"
+    ],
+    "quantity": [
+      "content_quantity_value",
+      "total_content_value",
+      "quantity",
+      "Menge"
+    ],
+    "packaging_type": [
+      "packaging_type",
+      "packaging",
+      "unit",
+      "Verpackung"
+    ],
+    "calibre": [
+      "calibre",
+      "caliber",
+      "Kaliber"
+    ],
+    "fresh_or_frozen": [
+      "fresh_or_frozen",
+      "temperature_state",
+      "Temperaturzustand"
+    ],
+    "brand": [
+      "brand",
+      "Marke"
+    ]
+  },
+  "confirmed_policy": {
+    "core_fresh_positive": [
+      "raw meat or poultry, including cut, minced, formed, skewered and seasoned raw products as well as frozen raw cuts",
+      "raw fish or seafood, including chilled, thawed, frozen and seasoned raw products",
+      "fresh fruit, vegetables, leaf salads, herbs, mushrooms and potatoes"
+    ],
+    "hard_negative": [
+      "non-food and household goods",
+      "explicitly ready-to-eat, marinated, sauced, cooked, fried, smoked, cured, pickled, jarred, canned, preserved, deli, dip and spread products",
+      "processed fruit and vegetable products such as pizza sauce, guacamole and pickles"
+    ],
+    "variant_policy": {
+      "calibre": "non_blocking_offer_attribute",
+      "missing_attribute": "compatible_without_conflict",
+      "known_origin_conflict": "separate_variant",
+      "multi_origin": "exact_combination",
+      "premium_line": "separate_variant",
+      "brand_evidence": "product_name_description_or_visible_product_only"
+    },
+    "packaged_exception_brands": [
+      "ARO",
+      "Chef",
+      "Metro",
+      "Milram",
+      "Schleiz",
+      "Quality",
+      "economy",
+      "Edeka",
+      "Foodservice",
+      "Henkelmann",
+      "Meemken",
+      "Aviko"
+    ],
+    "packaged_exception_products": [
+      "Oil",
+      "Cream",
+      "Quark",
+      "Cheese",
+      "Sausage",
+      "Frozen vegetables",
+      "French fries",
+      "Milk"
+    ],
+    "minimum_package_grams": {
+      "Cheese": 500,
+      "Sausage": 500
+    }
+  },
+  "cases": [
+    {
+      "case_id": "relevance_positive_cherry_vine_tomatoes",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Alte Namen ohne exakte Angebotsübernahme",
+        "reported_product": "Cherry-Strauchtomaten",
+        "old_excel_row": 140,
+        "raw_row_available": false,
+        "policy_basis": "Unprocessed fresh vegetable"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "normalized_equals",
+            "value": "Cherry Strauchtomaten"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "relevance",
+          "value": "yes"
+        }
+      ]
+    },
+    {
+      "case_id": "relevance_positive_lollo_leaves",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Alte Namen ohne exakte Angebotsübernahme",
+        "reported_product": "Lollo Rosso / Lollo Bionda Blätter",
+        "old_excel_row": 161,
+        "raw_row_available": false,
+        "policy_basis": "Fresh leaf salad"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "contains",
+            "value": "Lollo"
+          },
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "contains",
+            "value": "Blätter"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "relevance",
+          "value": "yes"
+        }
+      ]
+    },
+    {
+      "case_id": "relevance_positive_red_table_grapes",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Alte Namen ohne exakte Angebotsübernahme",
+        "reported_product": "Tafeltrauben Rot",
+        "old_excel_row": 180,
+        "raw_row_available": false,
+        "policy_basis": "Unprocessed fresh fruit"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "normalized_equals",
+            "value": "Tafeltrauben Rot"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "relevance",
+          "value": "yes"
+        }
+      ]
+    },
+    {
+      "case_id": "relevance_positive_lamb_rump_steaks_when_plain",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Alte Namen ohne exakte Angebotsübernahme",
+        "reported_product": "Lammhüftsteaks",
+        "old_excel_row": 84,
+        "raw_row_available": false,
+        "policy_basis": "Raw/simple meat cut; assertion applies when no marinade, sauce or ready-to-eat evidence is present"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "normalized_equals",
+            "value": "Lammhüftsteaks"
+          },
+          {
+            "field": "description",
+            "op": "not_regex",
+            "value": "marinad|sauce|soße|vorgegart|verzehrfertig"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "relevance",
+          "value": "yes"
+        }
+      ]
+    },
+    {
+      "case_id": "relevance_positive_pork_strips_when_plain",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Alte Namen ohne exakte Angebotsübernahme",
+        "reported_product": "Schweinegeschnetzeltes",
+        "old_excel_row": 112,
+        "raw_row_available": false,
+        "policy_basis": "Raw/simple meat cut; assertion applies when no marinade, sauce or ready-to-eat evidence is present"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "normalized_equals",
+            "value": "Schweinegeschnetzeltes"
+          },
+          {
+            "field": "description",
+            "op": "not_regex",
+            "value": "marinad|sauce|soße|vorgegart|verzehrfertig"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "relevance",
+          "value": "yes"
+        }
+      ]
+    },
+    {
+      "case_id": "relevance_positive_raw_cevapcici",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Alte Namen ohne exakte Angebotsübernahme",
+        "reported_product": "Cevapčiči",
+        "old_excel_row": 58,
+        "raw_row_available": false,
+        "policy_basis": "Customer confirmed all raw formed and seasoned meat as relevant"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": ["source_product_name", "normalized_product_name"],
+            "op": "contains",
+            "value": "Cevap"
+          },
+          {
+            "field": "description",
+            "op": "not_regex",
+            "value": "marinad|sauce|soße|gegart|gebraten|verzehrfertig"
+          }
+        ]
+      },
+      "cardinality": {"min": 1},
+      "assertions": [
+        {"type": "field_equals", "field": "relevance", "value": "yes"}
+      ]
+    },
+    {
+      "case_id": "relevance_positive_raw_smash_burger",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Alte Namen ohne exakte Angebotsübernahme",
+        "reported_product": "Smash Burger",
+        "old_excel_row": 124,
+        "raw_row_available": false,
+        "policy_basis": "Customer confirmed raw formed meat as relevant"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": ["source_product_name", "normalized_product_name"],
+            "op": "contains",
+            "value": "Smash Burger"
+          },
+          {
+            "field": "description",
+            "op": "not_regex",
+            "value": "marinad|sauce|soße|gegart|gebraten|verzehrfertig"
+          }
+        ]
+      },
+      "cardinality": {"min": 1},
+      "assertions": [
+        {"type": "field_equals", "field": "relevance", "value": "yes"}
+      ]
+    },
+    {
+      "case_id": "relevance_negative_cream_herring",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Confirmed customer exclusions",
+        "reported_product": "Delikatess-Sahne-Heringsfilets",
+        "raw_row_available": false,
+        "policy_basis": "Prepared fish with cream/sauce"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "contains",
+            "value": "Sahne Heringsfilets"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "relevance",
+          "value": "no"
+        }
+      ]
+    },
+    {
+      "case_id": "relevance_negative_marinated_product",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Confirmed customer exclusions",
+        "reported_product": "marinierte Produkte",
+        "raw_row_available": false,
+        "policy_basis": "Marinated products are excluded"
+      },
+      "selector": {
+        "any": [
+          {
+            "fields": [
+              "source_product_name",
+              "description"
+            ],
+            "op": "regex",
+            "value": "marinad|mariniert"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "relevance",
+          "value": "no"
+        }
+      ]
+    },
+    {
+      "case_id": "relevance_negative_pizza_sauce",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Confirmed customer exclusions",
+        "reported_product": "Pizzasauce",
+        "raw_row_available": false,
+        "policy_basis": "Processed vegetable sauce"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "contains",
+            "value": "Pizzasauce"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "relevance",
+          "value": "no"
+        }
+      ]
+    },
+    {
+      "case_id": "relevance_negative_guacamole",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Confirmed customer exclusions",
+        "reported_product": "Guacamole",
+        "raw_row_available": false,
+        "policy_basis": "Prepared dip"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "contains",
+            "value": "Guacamole"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "relevance",
+          "value": "no"
+        }
+      ]
+    },
+    {
+      "case_id": "relevance_negative_pickles",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Confirmed customer exclusions",
+        "reported_product": "Gewürzgurken",
+        "raw_row_available": false,
+        "policy_basis": "Pickled/preserved vegetable"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "contains",
+            "value": "Gewürzgurken"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "relevance",
+          "value": "no"
+        }
+      ]
+    },
+    {
+      "case_id": "relevance_negative_toilet_paper",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Confirmed customer exclusions",
+        "reported_product": "Toilettenpapier",
+        "raw_row_available": false,
+        "policy_basis": "Non-food household product"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "contains",
+            "value": "Toilettenpapier"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "relevance",
+          "value": "no"
+        }
+      ]
+    },
+    {
+      "case_id": "relevance_negative_sparkling_wine",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Positive clean-up in controlled comparison",
+        "reported_product": "Riesling Sekt",
+        "old_excel_row": 210,
+        "raw_row_available": false,
+        "policy_basis": "Beverage outside the requested assortment"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "normalized_equals",
+            "value": "Riesling Sekt"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "relevance",
+          "value": "no"
+        }
+      ]
+    },
+    {
+      "case_id": "relevance_negative_santoku_knife",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Positive clean-up in controlled comparison",
+        "reported_product": "Santokumesser",
+        "old_excel_row": 211,
+        "raw_row_available": false,
+        "policy_basis": "Non-food equipment"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "contains",
+            "value": "Santokumesser"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "relevance",
+          "value": "no"
+        }
+      ]
+    },
+    {
+      "case_id": "relevance_positive_short_ribs_bbq_without_preparation_evidence",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Alte Namen ohne exakte Angebotsübernahme",
+        "reported_product": "Short Ribs BBQ",
+        "old_excel_row": 123,
+        "raw_row_available": false,
+        "policy_basis": "BBQ in a product name alone does not prove sauce or marinade"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "normalized_equals",
+            "value": "Short Ribs BBQ"
+          },
+          {
+            "field": "description",
+            "op": "not_regex",
+            "value": "marinad|sauce|soße|gegart|vorgegart|verzehrfertig"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "relevance",
+          "value": "yes"
+        }
+      ]
+    },
+    {
+      "case_id": "relevance_positive_raw_lamb_skewers",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Alte Namen ohne exakte Angebotsübernahme",
+        "reported_product": "Lammspieße",
+        "old_excel_row": 85,
+        "raw_row_available": false,
+        "policy_basis": "Raw skewered meat is relevant unless sauce, marinade or cooking is explicitly evidenced"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "contains",
+            "value": "Lammspieße"
+          },
+          {
+            "field": "description",
+            "op": "not_regex",
+            "value": "marinad|sauce|soße|gegart|vorgegart|verzehrfertig"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "relevance",
+          "value": "yes"
+        }
+      ]
+    },
+    {
+      "case_id": "group_pfifferlinge_offer_variants",
+      "issue": "grouping",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Klare oder sehr wahrscheinliche Gruppierungsfehler",
+        "reported_product": "Pfifferlinge",
+        "new_excel_rows": [
+          137,
+          138
+        ],
+        "reported_attributes": "same category, description mittelfallend, origins UA/RO, Selgros and 10.-15.08.; prices 28.99/11.99 and package displays 3 Kiste/1 Korb",
+        "raw_row_available": false,
+        "policy_basis": "Same product variant, separate offers"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "normalized_equals",
+            "value": "Pfifferlinge"
+          },
+          {
+            "field": "supplier",
+            "op": "normalized_equals",
+            "value": "Selgros"
+          },
+          {
+            "field": "description",
+            "op": "contains",
+            "value": "mittelfallend"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 2
+      },
+      "assertions": [
+        {
+          "type": "field_same",
+          "field": "family_id"
+        },
+        {
+          "type": "field_same",
+          "field": "variant_id"
+        },
+        {
+          "type": "field_distinct",
+          "field": "offer_id"
+        }
+      ]
+    },
+    {
+      "case_id": "group_vegetable_onions_offer_periods",
+      "issue": "grouping",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Klare oder sehr wahrscheinliche Gruppierungsfehler",
+        "reported_product": "Gemüsezwiebeln",
+        "new_excel_rows": [
+          114,
+          115
+        ],
+        "reported_attributes": "Spain, calibre 80-110, Selgros, price 5.99; periods and description completeness differ",
+        "raw_row_available": false,
+        "policy_basis": "Same product variant, separate validity-period offers"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "normalized_equals",
+            "value": "Gemüsezwiebeln"
+          },
+          {
+            "field": "supplier",
+            "op": "normalized_equals",
+            "value": "Selgros"
+          },
+          {
+            "fields": [
+              "calibre",
+              "description"
+            ],
+            "op": "contains",
+            "value": "80-110"
+          },
+          {
+            "field": "price",
+            "op": "number_equals",
+            "value": 5.99
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 2
+      },
+      "assertions": [
+        {
+          "type": "field_same",
+          "field": "family_id"
+        },
+        {
+          "type": "field_same",
+          "field": "variant_id"
+        },
+        {
+          "type": "field_distinct",
+          "field": "offer_id"
+        }
+      ]
+    },
+    {
+      "case_id": "group_carrot_synonyms_offer_periods",
+      "issue": "grouping",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Klare oder sehr wahrscheinliche Gruppierungsfehler",
+        "reported_product": "Karotte/Möhre",
+        "new_excel_rows": [
+          120,
+          121
+        ],
+        "reported_attributes": "Germany, same supplier and price 6.49; one description says Klasse I, 5 kg and the other is empty; periods differ",
+        "raw_row_available": false,
+        "policy_basis": "Karotte and Möhre are the same family/variant here, with separate offers"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "regex",
+            "value": "^(Karotte|Möhre)$"
+          },
+          {
+            "field": "supplier",
+            "op": "normalized_equals",
+            "value": "Selgros"
+          },
+          {
+            "field": "price",
+            "op": "number_equals",
+            "value": 6.49
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 2
+      },
+      "assertions": [
+        {
+          "type": "field_same",
+          "field": "family_id"
+        },
+        {
+          "type": "field_same",
+          "field": "variant_id"
+        },
+        {
+          "type": "field_distinct",
+          "field": "offer_id"
+        }
+      ]
+    },
+    {
+      "case_id": "variant_roastbeef_fresh_vs_frozen",
+      "issue": "variant",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Gleichnamig, aber wahrscheinlich korrekt getrennt",
+        "reported_product": "Rinder-Roastbeef",
+        "new_excel_rows": [
+          73,
+          203
+        ],
+        "reported_attributes": "fresh Uruguay versus frozen Argentina",
+        "raw_row_available": false,
+        "policy_basis": "Same family, different temperature-state variants"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "normalized_equals",
+            "value": "Rinder Roastbeef"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 2
+      },
+      "assertions": [
+        {
+          "type": "field_same",
+          "field": "family_id"
+        },
+        {
+          "type": "field_distinct",
+          "field": "variant_id"
+        },
+        {
+          "type": "field_distinct",
+          "field": "fresh_or_frozen"
+        },
+        {
+          "type": "field_distinct",
+          "field": "offer_id"
+        }
+      ]
+    },
+    {
+      "case_id": "variant_schweinenacken_duroc",
+      "issue": "variant",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Gleichnamig, aber wahrscheinlich korrekt getrennt",
+        "reported_product": "Schweinenacken",
+        "new_excel_rows": [
+          89,
+          90
+        ],
+        "reported_attributes": "generic EU pork neck versus fresh Spanish Duroc pork neck",
+        "raw_row_available": false,
+        "policy_basis": "Same family, distinct commercial variants"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "contains",
+            "value": "Schweinenacken"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 2
+      },
+      "assertions": [
+        {
+          "type": "field_same",
+          "field": "family_id"
+        },
+        {
+          "type": "field_distinct",
+          "field": "variant_id"
+        },
+        {
+          "type": "field_distinct",
+          "field": "offer_id"
+        }
+      ]
+    },
+    {
+      "case_id": "variant_forelle_calibre_is_non_blocking",
+      "issue": "variant",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Gleichnamig, aber wahrscheinlich korrekt getrennt",
+        "reported_product": "Forelle",
+        "old_excel_rows": [
+          13,
+          14
+        ],
+        "reported_attributes": "calibres 200-400 g and 300-400 g plus different periods",
+        "raw_row_available": false,
+        "policy_basis": "Customer confirmed that different calibres belong to the same variant"
+      },
+      "selector": {
+        "all": [
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "normalized_equals",
+            "value": "Forelle"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 2,
+        "max": 2
+      },
+      "assertions": [
+        {
+          "type": "field_same",
+          "field": "family_id"
+        },
+        {
+          "type": "field_same",
+          "field": "variant_id"
+        },
+        {
+          "type": "field_distinct",
+          "field": "offer_id"
+        }
+      ]
+    },
+    {
+      "case_id": "normalization_block_red_snapper_to_rotbarsch",
+      "issue": "normalization",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Normalisierung: schwerer Semantikfehler",
+        "reported_product": "Red Snapper Filet",
+        "old_excel_row": 244,
+        "new_excel_row": 204,
+        "reported_bad_mapping": "Rotbarsch Filet",
+        "raw_row_available": false,
+        "policy_basis": "Red Snapper and Rotbarsch must not be treated as synonyms"
+      },
+      "selector": {
+        "all": [
+          {
+            "field": "source_product_name",
+            "op": "normalized_equals",
+            "value": "Red Snapper Filet"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_nonempty",
+          "field": "normalized_product_name"
+        },
+        {
+          "type": "field_not_equals",
+          "field": "normalized_product_name",
+          "value": "Rotbarsch Filet"
+        },
+        {
+          "type": "field_not_equals",
+          "field": "normalized_product_name",
+          "value": "Rotbarschfilet"
+        }
+      ]
+    },
+    {
+      "case_id": "normalization_translate_pork_back",
+      "issue": "normalization",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Previously confirmed English-name translation rule",
+        "reported_product": "Pork Back",
+        "raw_row_available": false,
+        "policy_basis": "Translate the product term to German without changing brands"
+      },
+      "selector": {
+        "all": [
+          {
+            "field": "source_product_name",
+            "op": "normalized_equals",
+            "value": "Pork Back"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "normalized_product_name",
+          "value": "Schweinerücken"
+        }
+      ]
+    },
+    {
+      "case_id": "normalization_translate_thin_skirt",
+      "issue": "normalization",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Umbenennungen und Konsolidierungen mit identischem Angebot",
+        "reported_product": "Rinder Thin Skirt",
+        "reported_target": "Rinder Zwerchfell",
+        "old_excel_row": 96,
+        "new_excel_row": 72,
+        "raw_row_available": false,
+        "policy_basis": "Accepted German product-term normalization in the controlled comparison"
+      },
+      "selector": {
+        "all": [
+          {
+            "field": "source_product_name",
+            "op": "normalized_equals",
+            "value": "Rinder Thin Skirt"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "normalized_product_name",
+          "value": "Rinder Zwerchfell"
+        }
+      ]
+    },
+    {
+      "case_id": "normalization_translate_sweet_potato_fries",
+      "issue": "normalization",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Umbenennungen und Konsolidierungen mit identischem Angebot",
+        "reported_product": "Sweet Potato Fries",
+        "reported_target": "Süßkartoffel-Pommes Frites",
+        "old_excel_row": 249,
+        "new_excel_row": 209,
+        "raw_row_available": false,
+        "policy_basis": "Accepted German product-term normalization in the controlled comparison"
+      },
+      "selector": {
+        "all": [
+          {
+            "field": "source_product_name",
+            "op": "normalized_equals",
+            "value": "Sweet Potato Fries"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "normalized_product_name",
+          "value": "Süßkartoffel Pommes Frites"
+        }
+      ]
+    },
+    {
+      "case_id": "packaged_exception_aro_pommes",
+      "issue": "relevance",
+      "evaluation": "enforced",
+      "source_reference": {
+        "report_section": "Confirmed packaged-exception policy",
+        "reported_product": "ARO Pommes",
+        "raw_row_available": false,
+        "policy_basis": "Allowed product plus required brand"
+      },
+      "selector": {
+        "all": [
+          {
+            "field": "brand",
+            "op": "normalized_equals",
+            "value": "ARO"
+          },
+          {
+            "fields": [
+              "source_product_name",
+              "normalized_product_name"
+            ],
+            "op": "contains",
+            "value": "Pommes"
+          }
+        ]
+      },
+      "cardinality": {
+        "min": 1
+      },
+      "assertions": [
+        {
+          "type": "field_equals",
+          "field": "relevance",
+          "value": "yes"
+        }
+      ]
+    }
+  ]
+}

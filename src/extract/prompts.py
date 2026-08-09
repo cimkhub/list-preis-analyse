@@ -15,12 +15,28 @@ Extrahiere ALLE sichtbaren Produkte als JSON-Array. Für jedes Produkt:
   "description": "Zusatzinfos (Herkunft, Qualität, Zubereitung) oder null",
   "origin": "Herkunftsland/-region oder null",
   "category": "fleisch|fisch|obst_gemuese|tk|wurst|mopro|sonstiges",
-  "unit": "kg|stueck|packung|beutel|karton|flasche|bund|schale",
-  "quantity": Verpackungsgröße als Zahl oder null,
+  "product_family": "fleisch|fisch|obst_gemuese|mopro|wurst|sonstiges|unknown",
+  "temperature_state": "fresh|chilled|frozen|thawed|ambient|unknown",
+  "processing_state": "raw_plain|raw_cut|raw_minced|raw_formed|raw_skewered|raw_seasoned|marinated|sauced|cooked|fried|smoked|cured|pickled|preserved|ready_to_eat|unknown",
+  "calibre": "Sichtbares Kaliber bzw. sichtbare Größen-/Gewichtsspanne als Text oder null",
+  "source_brand": "Direkt am Produkt sichtbare Marke, exakt geschrieben, oder null",
+  "brand_evidence": "Exakter sichtbarer Text/Logo-Text, der die Produktmarke belegt, oder null",
+  "brand_evidence_source": "product_name|description|image|unknown",
+  "certifications": ["Explizit sichtbare Zertifizierung wie ASC, MSC, BIO, HALAL oder QS"] oder [],
+  "unit": "kg|g|l|ml|stueck|packung|beutel|karton|flasche|bund|schale",
+  "quantity": Legacy-Mengenwert als Zahl oder null,
   "price": Preis als Dezimalzahl (Punkt, nicht Komma),
+  "price_basis": "per_kg|per_100g|per_liter|per_100ml|per_piece|per_package|unknown",
   "price_is_net": true wenn Netto-Preis (mit * markiert), sonst false,
   "price_gross": Brutto-Preis wenn separat angegeben oder null,
   "price_tiers": [{{"min_qty": Mindestmenge, "price": Preis}}] oder null,
+  "package_count": Anzahl gleichartiger Inhaltseinheiten im angebotenen Gebinde als ganze Zahl oder null,
+  "package_size_value": Inhalt je Einheit als Zahl oder null,
+  "package_size_unit": "g|kg|ml|l|piece|unknown",
+  "total_content_value": Gesamtinhalt des angebotenen Gebindes als Zahl oder null,
+  "total_content_unit": "g|kg|ml|l|piece|unknown",
+  "packaging_type": "bag|pack|box|crate|basket|tray|bucket|bottle|can|bundle|piece|unknown",
+  "packaging_raw": "Sichtbare Packungs-/Mengenangabe wortgetreu oder null",
   "confidence": 0.0-1.0 Vertrauen in die Extraktion
 }}
 
@@ -29,6 +45,24 @@ Regeln:
 - Preise in Klammern nach *-Preisen sind BRUTTO
 - Verwende Dezimalpunkt: 11.99 nicht 11,99
 - Hochgestellte Ziffern (große "11" kleine "99") → 11.99
+- product_family beschreibt die fachliche Produktfamilie unabhängig von Temperatur und category. Tiefgekühlter Fisch bleibt product_family "fisch", tiefgekühltes Fleisch bleibt "fleisch"
+- temperature_state nur aus sichtbaren oder eindeutig produktbezogenen Angaben ableiten. "erntefrisch" allein ist KEIN Hinweis auf "frozen"
+- processing_state beschreibt die Produktform bzw. Verarbeitung. Bei fehlender oder widersprüchlicher Evidenz "unknown" verwenden
+- calibre separat und wortgetreu erfassen; nicht in Produktname oder Verpackungsmenge umdeuten
+- source_brand nur setzen, wenn die Marke direkt dem Produkt zugeordnet ist. Händler-/Supplier-Logo, Seitenkopf und Eigenwerbung sind keine Produktmarke
+- source_brand nicht übersetzen oder als Synonym normalisieren. brand_evidence wortgetreu und brand_evidence_source passend zur sichtbaren Quelle setzen
+- ASC, MSC, BIO, HALAL, QS und vergleichbare Siegel sind Zertifizierungen und keine Marken. Nur sichtbare Zertifizierungen in certifications aufnehmen
+- Trenne Inhaltsmenge strikt von Verpackungsart. g, kg, ml und l sind Inhalts-/Maßeinheiten und NIEMALS eine Anzahl von Beuteln, Packungen, Kartons oder Flaschen
+- Beispiel "2500 g Beutel": package_count 1, package_size_value 2500, package_size_unit "g", total_content_value 2500, total_content_unit "g", packaging_type "bag", packaging_raw "2500 g Beutel"
+- Beispiel "1000 g Packung": package_count 1, package_size_value 1000, package_size_unit "g", total_content_value 1000, total_content_unit "g", packaging_type "pack"
+- Beispiel "10 x 80 g, Gesamt 800 g pro Packung": package_count 10, package_size_value 80, package_size_unit "g", total_content_value 800, total_content_unit "g", packaging_type "pack"
+- Angaben wie "100/200 Stück/lb" oder "8/12" sind Kaliber und NIEMALS package_count. Erfasse sie ausschließlich in calibre
+- Legacy-Felder unit/quantity: Wenn ein Gesamtinhalt sichtbar ist, verwende dessen Maßeinheit und Menge (z.B. quantity 2500 und unit "g"), niemals quantity 2500 und unit "beutel". Nur wenn ausschließlich eine Packungsanzahl sichtbar ist, darf die Verpackungsart als unit verwendet werden
+- price_basis beschreibt, wofür der große Angebotspreis gilt. Ein zusätzlicher Grundpreis "kg = ..." gehört in price_per_kg; der große Preis eines Beutels bleibt price_basis "per_package"
+- Wenn count × Einzelinhalt und sichtbarer Gesamtinhalt angegeben sind, müssen sie nach g/kg- bzw. ml/l-Umrechnung zusammenpassen
+- Mehrere echte Preis-/Packungsvarianten als mehrere getrennte Produktobjekte ausgeben. Preisstaffeln derselben Variante bleiben in price_tiers
+- Wenn die Zuordnung von Anzahl, Einzelinhalt, Gesamtinhalt oder Verpackungsart unklar ist: packaging_raw wortgetreu erhalten, unklare strukturierte Felder auf null bzw. "unknown" setzen und confidence < 0.7 verwenden
+- Wenn Produktfamilie, Temperatur, Verarbeitung oder Markenquelle nicht sicher bestimmbar sind, jeweils "unknown" bzw. null verwenden
 - Überspringe Nicht-Lebensmittel komplett
 - Bei Unsicherheit: confidence < 0.7
 - Leere Seiten oder Seiten ohne Produkte → leeres Array []"""

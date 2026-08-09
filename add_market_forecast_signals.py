@@ -143,8 +143,17 @@ def configure_deepseek_models(args: argparse.Namespace) -> None:
     SIGNAL_CACHE_VERSION = f"brave-tavily-source-label-reasoner-v3:{DEEPSEEK_MODEL}:{DEEPSEEK_SIGNAL_MODEL}"
 
 
+MATCHING_AUDIT_SHEETS = {
+    "matched_products",
+    "review_queue",
+    "pair_debug",
+    "attribute_debug",
+    "observation_dedupe",
+}
+
+
 def finalize_customer_workbook(wb, workbook_path: Path) -> str:
-    """Keep only the customer-facing short output sheet and name it KWXX."""
+    """Keep one visible customer sheet while retaining matching audit data internally."""
     source_name = None
     for candidate in ["Final Output Short", final_sheet_name_from_path(workbook_path), "Final Output"]:
         if candidate in wb.sheetnames:
@@ -156,9 +165,14 @@ def finalize_customer_workbook(wb, workbook_path: Path) -> str:
     ws = wb[source_name]
     target_name = final_sheet_name_from_path(workbook_path)
     for sheet_name in list(wb.sheetnames):
-        if sheet_name != source_name:
+        if sheet_name == source_name:
+            continue
+        if sheet_name in MATCHING_AUDIT_SHEETS:
+            wb[sheet_name].sheet_state = "veryHidden"
+        else:
             del wb[sheet_name]
     ws.title = target_name
+    ws.sheet_state = "visible"
     return target_name
 
 

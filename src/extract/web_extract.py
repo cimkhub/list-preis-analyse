@@ -4,7 +4,7 @@ import re
 from datetime import date
 
 from src.models import RawProduct
-from src.extract.text_extract import classify_category
+from src.extract.text_extract import classify_product_family, classify_temperature_state
 
 logger = logging.getLogger("birkenhof.extract.web")
 
@@ -52,12 +52,17 @@ def parse_json_ld_offers(json_ld_data: list[dict], supplier: str,
                     pass
 
             unit = _detect_unit(name, description)
+            identity_text = name + " " + (description or "")
+            product_family = classify_product_family(identity_text)
+            category = product_family if product_family != "unknown" else "sonstiges"
 
             products.append(RawProduct(
                 supplier=supplier,
                 product_name=name,
                 description=description,
-                category=classify_category(name + " " + (description or "")),
+                category=category,
+                product_family=product_family,
+                temperature_state=classify_temperature_state(identity_text),
                 unit=unit,
                 price=price,
                 price_is_net=False,

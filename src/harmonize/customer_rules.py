@@ -1,7 +1,17 @@
 from __future__ import annotations
 
-import re
 from typing import Any
+
+
+CANONICAL_CATEGORIES = frozenset(
+    {"fleisch", "fisch", "obst_gemuese", "tk", "wurst", "mopro", "sonstiges"}
+)
+CATEGORY_ALIASES = {
+    "obst & gemüse": "obst_gemuese",
+    "obst & gemuese": "obst_gemuese",
+    "obst/gemüse": "obst_gemuese",
+    "obst/gemuese": "obst_gemuese",
+}
 
 
 def text_for_product_fields(*values: object) -> str:
@@ -16,26 +26,16 @@ def apply_customer_category_overrides(
     brand: object = "",
     unit: object = "",
 ) -> str:
-    result = (category or "sonstiges").strip().casefold() or "sonstiges"
-    text = text_for_product_fields(brand, product_name, description).casefold()
-    unit_text = str(unit or "").strip().casefold()
+    """Normalize the supplied category without inferring it from product text.
 
-    if _contains_any_word(text, ["gefroren", "tiefgefroren", "tiefkühl", "tiefkuehl"]):
-        result = "tk"
-
-    if _contains_any_word(text, ["friesenkrone"]):
-        result = "mopro"
-
-    if any(term in text for term in ["bacon", "bratwurst", "bratwürst", "bratwuerst"]):
-        result = "wurst"
-
-    if unit_text in {"glas", "gläser", "glaeser", "dose", "dosen"} or _contains_any_word(
-        text,
-        ["glas", "gläser", "glaeser", "dose", "dosen"],
-    ):
-        result = "sonstiges"
-
-    return result
+    The keyword arguments remain part of the public API for older callers. Product
+    name, description, brand, packaging and temperature must not silently rewrite
+    the product family/category at this layer.
+    """
+    _ = product_name, description, brand, unit
+    normalized = str(category or "").strip().casefold()
+    normalized = CATEGORY_ALIASES.get(normalized, normalized)
+    return normalized if normalized in CANONICAL_CATEGORIES else "sonstiges"
 
 
 def apply_customer_category_overrides_to_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -60,7 +60,3 @@ def apply_customer_category_overrides_to_product(product: Any) -> Any:
     if category == product.category:
         return product
     return product.model_copy(update={"category": category})
-
-
-def _contains_any_word(text: str, words: list[str]) -> bool:
-    return any(re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text) for word in words)

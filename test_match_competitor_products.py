@@ -5,13 +5,13 @@ import pandas as pd
 
 from match_competitor_products import (
     build_final_output_rows,
-    dedupe_exact_same_supplier_offers,
     final_output_column_widths,
     format_offer_cell_short,
     normalize_confidence,
     origin_country_codes,
     write_final_output_sheet,
 )
+from src.harmonize.product_identity import make_offer_id
 
 
 def test_normalize_confidence_accepts_fractional_and_percent_scales():
@@ -21,54 +21,21 @@ def test_normalize_confidence_accepts_fractional_and_percent_scales():
     assert normalize_confidence("") == 0
 
 
-def test_dedupe_exact_same_supplier_offers_ignores_source_and_unit_noise():
-    rows = [
-        {
-            "product_id": "p1",
-            "supplier": "metro",
-            "supplier_norm": "Metro",
-            "category": "fisch",
-            "product_name": "Marinaden",
-            "product": "Marinaden",
-            "brand": "",
-            "description": "Verschiedene Sorten",
-            "origin": "",
-            "unit": "schale",
-            "quantity": "2.5",
-            "price": "19.99",
-            "price_per_kg": "",
-            "price_tiers": '[{"min_qty": 4, "price": 19.99}]',
-            "valid_from": "2026-06-01",
-            "valid_to": "2026-06-06",
-            "source_file": "a.pdf",
-            "source_page": "8",
-        },
-        {
-            "product_id": "p2",
-            "supplier": "metro",
-            "supplier_norm": "Metro",
-            "category": "fisch",
-            "product_name": "Marinaden",
-            "product": "Marinaden",
-            "brand": "",
-            "description": "Verschiedene Sorten",
-            "origin": "",
-            "unit": "kg",
-            "quantity": "2.5",
-            "price": "19.99",
-            "price_per_kg": "",
-            "price_tiers": '[{"price": 19.99, "min_qty": 4}]',
-            "valid_from": "2026-06-01",
-            "valid_to": "2026-06-06",
-            "source_file": "b.pdf",
-            "source_page": "9",
-        },
-    ]
+def test_offer_identity_preserves_different_commercial_units():
+    base = {
+        "supplier": "metro",
+        "supplier_norm": "Metro",
+        "location": "Goslar",
+        "quantity": "2.5",
+        "price": "19.99",
+        "price_tiers": '[{"min_qty": 4, "price": 19.99}]',
+        "valid_from": "2026-06-01",
+        "valid_to": "2026-06-06",
+    }
 
-    deduped, removed = dedupe_exact_same_supplier_offers(pd.DataFrame(rows))
-
-    assert removed == 1
-    assert len(deduped) == 1
+    assert make_offer_id("pv_test", {**base, "unit": "schale"}) != make_offer_id(
+        "pv_test", {**base, "unit": "kg"}
+    )
 
 
 def test_final_output_moves_brand_into_description_and_removes_brand_column():

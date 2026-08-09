@@ -4,11 +4,10 @@ from datetime import date
 
 from src.models import RawProduct
 from src.convert.pdf_to_images import pdf_to_text, pdf_page_to_text, pdf_page_count
-from src.harmonize.customer_rules import apply_customer_category_overrides
 
 logger = logging.getLogger("birkenhof.extract.text")
 
-CATEGORY_MAP = {
+PRODUCT_FAMILY_MAP = {
     # Fleisch
     "fleisch": "fleisch",
     "rind": "fleisch",
@@ -18,7 +17,6 @@ CATEGORY_MAP = {
     "schaf": "fleisch",
     "pute": "fleisch",
     "roastbeef": "fleisch",
-    "filet": "fleisch",
     "hackfleisch": "fleisch",
     "gulasch": "fleisch",
     "schnitzel": "fleisch",
@@ -41,6 +39,9 @@ CATEGORY_MAP = {
     "seelachs": "fisch",
     "skrei": "fisch",
     "thunfisch": "fisch",
+    "hering": "fisch",
+    "rotbarsch": "fisch",
+    "snapper": "fisch",
     # Obst & Gemüse
     "obst": "obst_gemuese",
     "gemüse": "obst_gemuese",
@@ -65,7 +66,10 @@ CATEGORY_MAP = {
     "physalis": "obst_gemuese",
     "aubergine": "obst_gemuese",
     "kohl": "obst_gemuese",
-    "frischeangebot": "obst_gemuese",
+    "broccoli": "obst_gemuese",
+    "brokkoli": "obst_gemuese",
+    "himbeere": "obst_gemuese",
+    "brechbohne": "obst_gemuese",
     # Milchprodukte
     "molkerei": "mopro",
     "milch": "mopro",
@@ -79,15 +83,6 @@ CATEGORY_MAP = {
     "butter": "mopro",
     "margarine": "mopro",
     "ayran": "mopro",
-    # TK
-    "tiefkühl": "tk",
-    "tiefgefroren": "tk",
-    "tk ": "tk",
-    " tk": "tk",
-    "fries": "tk",
-    "broccoli": "tk",
-    "himbeere": "tk",
-    "brechbohne": "tk",
     # Wurst
     "wurst": "wurst",
     "bockwurst": "wurst",
@@ -97,13 +92,46 @@ CATEGORY_MAP = {
     "feinkost": "sonstiges",
 }
 
+# Backwards-compatible module constant. It now maps product terms to families
+# only; temperature is deliberately represented separately.
+CATEGORY_MAP = PRODUCT_FAMILY_MAP
+
+
+def classify_product_family(text: str) -> str:
+    text_lower = str(text or "").casefold()
+    for keyword, family in PRODUCT_FAMILY_MAP.items():
+        if keyword in text_lower:
+            return family
+    return "unknown"
+
 
 def classify_category(text: str) -> str:
-    text_lower = text.lower()
-    for keyword, cat in CATEGORY_MAP.items():
-        if keyword in text_lower:
-            return apply_customer_category_overrides(cat, product_name=text)
-    return apply_customer_category_overrides("sonstiges", product_name=text)
+    """Return a legacy display category without mixing in temperature state."""
+    family = classify_product_family(text)
+    return family if family != "unknown" else "sonstiges"
+
+
+def classify_temperature_state(text: str) -> str:
+    """Classify temperature only from explicit, product-related wording."""
+    text_lower = str(text or "").casefold()
+    word_chars = "a-z0-9äöüß"
+    patterns = (
+        ("thawed", r"aufgetaut|angetaut|thawed"),
+        (
+            "frozen",
+            r"tiefgefroren|tiefgekühlt|tiefgekuehlt|tiefkühl|tiefkuehl|gefroren|frozen|tk",
+        ),
+        ("ambient", r"ungekühlt|ungekuehlt|raumtemperatur|ambient"),
+        ("chilled", r"gekühlt|gekuehlt|kühlpflichtig|kuehlpflichtig|chilled"),
+        ("fresh", r"frisch(?:e|er|es|en|em)?|fresh"),
+    )
+    for state, alternatives in patterns:
+        if re.search(
+            rf"(?<![{word_chars}])(?:{alternatives})(?![{word_chars}])",
+            text_lower,
+        ):
+            return state
+    return "unknown"
 
 
 def extract_metro_text(pdf_path: str, valid_from: date | None = None, valid_to: date | None = None) -> list[RawProduct]:
@@ -215,7 +243,10 @@ def _build_metro_product(name: str, details: list[str], tiers: list[dict],
         tier = tiers[0]
 
     description = "; ".join(details) if details else None
-    category = classify_category(name + " " + (description or ""))
+    identity_text = name + " " + (description or "")
+    product_family = classify_product_family(identity_text)
+    category = product_family if product_family != "unknown" else "sonstiges"
+    temperature_state = classify_temperature_state(identity_text)
 
     net_price = tier["price_net"]
     gross_price = tier.get("price_gross") or round(net_price * 1.07, 2)
@@ -225,6 +256,8 @@ def _build_metro_product(name: str, details: list[str], tiers: list[dict],
         product_name=name.strip(),
         description=description,
         category=category,
+        product_family=product_family,
+        temperature_state=temperature_state,
         price=net_price,
         price_is_net=True,
         price_gross=gross_price,

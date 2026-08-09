@@ -3,7 +3,6 @@
 
 import argparse
 import csv
-import json
 import logging
 import os
 import shlex
@@ -24,6 +23,7 @@ from src.harmonize.matcher import (
     load_canonical_products, match_all_products, build_comparison
 )
 from src.report.parsed_csv import (
+    deserialize_product_row,
     find_existing_supplier_parsed_csv_path,
     get_combined_parsed_csv_path,
     get_supplier_parsed_csv_path,
@@ -99,21 +99,7 @@ def load_products_from_parsed_csv(csv_path: Path) -> list[RawProduct]:
     with open(csv_path, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            row["price"] = float(row["price"]) if row["price"] else 0
-            row["extraction_confidence"] = float(row.get("extraction_confidence", 0.8))
-            row["price_is_net"] = row.get("price_is_net", "False") == "True"
-            row["price_tiers"] = (
-                json.loads(row["price_tiers"])
-                if row.get("price_tiers") and row["price_tiers"] != "None"
-                else None
-            )
-            for field in ["price_per_kg", "price_gross", "quantity"]:
-                row[field] = float(row[field]) if row.get(field) and row[field] != "None" else None
-            for field in ["calendar_week", "year", "source_page"]:
-                row[field] = int(row[field]) if row.get(field) and row[field] != "None" else None
-            for field in ["valid_from", "valid_to"]:
-                row[field] = row[field] if row.get(field) and row[field] != "None" else None
-            products.append(RawProduct(**row))
+            products.append(deserialize_product_row(row))
     return products
 
 
