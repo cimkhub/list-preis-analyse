@@ -6,6 +6,7 @@ import pandas as pd
 from match_competitor_products import (
     build_final_output_rows,
     dedupe_exact_same_supplier_offers,
+    dedupe_same_supplier_products,
     final_output_column_widths,
     format_offer_cell_short,
     normalize_confidence,
@@ -21,7 +22,7 @@ def test_normalize_confidence_accepts_fractional_and_percent_scales():
     assert normalize_confidence("") == 0
 
 
-def test_dedupe_exact_same_supplier_offers_ignores_source_and_unit_noise():
+def test_dedupe_exact_same_supplier_offers_keeps_different_units():
     rows = [
         {
             "product_id": "p1",
@@ -67,8 +68,99 @@ def test_dedupe_exact_same_supplier_offers_ignores_source_and_unit_noise():
 
     deduped, removed = dedupe_exact_same_supplier_offers(pd.DataFrame(rows))
 
+    assert removed == 0
+    assert len(deduped) == 2
+
+
+def test_dedupe_exact_same_supplier_offers_removes_only_full_commercial_identity():
+    base = {
+        "supplier": "selgros",
+        "supplier_norm": "Selgros",
+        "category": "fisch",
+        "product_name": "Forelle",
+        "product": "Forelle",
+        "brand": "",
+        "description": "ausgenommen, 300-400 g",
+        "origin": "",
+        "unit": "Kiste",
+        "quantity": "5",
+        "price": "12.99",
+        "price_per_kg": "",
+        "price_tiers": "",
+        "valid_from": "2026-08-03",
+        "valid_to": "2026-08-08",
+        "source_file": "a.pdf",
+        "source_page": "3",
+    }
+    identical_from_other_source = {
+        **base,
+        "source_file": "copy.pdf",
+        "source_page": "7",
+    }
+    rows = [
+        {**base, "product_id": "p1"},
+        {**identical_from_other_source, "product_id": "p2"},
+    ]
+
+    deduped, removed = dedupe_exact_same_supplier_offers(pd.DataFrame(rows))
+
     assert removed == 1
     assert len(deduped) == 1
+
+
+def test_same_supplier_dedupe_keeps_all_critical_distinct_offers():
+    cases = [
+        ("Forelle", "fisch", "ausgenommen, mit Kopf", "11.99", "12.99", "5", "Kiste"),
+        ("Cherry Strauchtomaten", "obst_gemuese", "Klasse I", "5.99", "6.99", "2", "Kiste"),
+        ("Weißkohl", "obst_gemuese", "Klasse I", "4.99", "4.99", "10", "Sack"),
+    ]
+
+    for product, category, description, old_price, new_price, quantity, unit in cases:
+        base = {
+            "supplier": "selgros",
+            "supplier_norm": "Selgros",
+            "category": category,
+            "product_name": product,
+            "product": product,
+            "brand": "",
+            "description": description,
+            "origin": "",
+            "unit": unit,
+            "quantity": quantity,
+            "price_per_kg": "",
+            "price_tiers": "",
+        }
+        rows = [
+            {
+                **base,
+                "product_id": "old",
+                "price": old_price,
+                "valid_from": "2026-08-03",
+                "valid_to": "2026-08-08",
+            },
+            {
+                **base,
+                "product_id": "new",
+                "price": new_price,
+                "valid_from": "2026-08-10",
+                "valid_to": "2026-08-15",
+            },
+        ]
+
+        deduped, removed = dedupe_same_supplier_products(
+            pd.DataFrame(rows),
+            attributes={},
+            embeddings={},
+            caches=None,
+            pair_client=None,
+            force=False,
+            skip_llm=True,
+            pair_workers=1,
+            top_k=1,
+        )
+
+        assert removed == 0, product
+        assert set(deduped["product_id"]) == {"old", "new"}, product
 
 
 def test_final_output_moves_brand_into_description_and_removes_brand_column():

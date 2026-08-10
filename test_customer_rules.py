@@ -75,6 +75,21 @@ def test_non_fresh_exclusions_cover_customer_feedback_examples():
         assert explicit_non_fresh_exclusion_reason(row) == reason
 
 
+def test_fresh_marinated_meat_is_not_treated_as_prepared_food():
+    assert explicit_non_fresh_exclusion_reason({
+        "category": "fleisch",
+        "product_name": "Lammhüftsteaks",
+        "description": "in Kräutermarinade, frisch",
+    }) is None
+
+    # The exception is deliberately narrow: fish in marinade stays excluded.
+    assert explicit_non_fresh_exclusion_reason({
+        "category": "fisch",
+        "product_name": "Heringsfilets",
+        "description": "mariniert, frisch",
+    }) in {"Prepared Fish", "Prepared"}
+
+
 def test_classify_row_sends_non_fresh_candidate_to_pro(monkeypatch):
     calls = []
 
@@ -144,3 +159,15 @@ def test_relevance_prompt_mentions_customer_feedback_negative_examples():
     assert "Guacamole => Nein|Dip" in prompt
     assert "Gewürzgurken => Nein|Preserved" in prompt
     assert "Toilettenpapier => Nein|Non Food" in prompt
+
+
+def test_relevance_prompt_prioritizes_fresh_raw_meat_over_bbq_and_marinade():
+    prompt = build_prompt({
+        "category": "fleisch",
+        "product_name": "Lammhüftsteaks",
+        "description": "in Kräutermarinade, frisch",
+    })
+
+    assert "Short Ribs BBQ, frisch => Ja|Meat" in prompt
+    assert "Lammhüftsteaks, in Kräutermarinade, frisch => Ja|Meat" in prompt
+    assert "This meat exception does not apply to fish/seafood" in prompt

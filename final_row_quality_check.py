@@ -32,7 +32,7 @@ DEFAULT_FLASH_MODEL = os.environ.get("DEEPSEEK_V4_FLASH_MODEL", "deepseek-v4-fla
 DEFAULT_WORKERS = 10
 DEFAULT_TIMEOUT_SECONDS = 120
 DEFAULT_MAX_RETRIES = 3
-PROMPT_VERSION = "final-row-quality-v1"
+PROMPT_VERSION = "final-row-quality-v2"
 DELETE_CONFIDENCE_THRESHOLD = 0.90
 CATEGORY_CONFIDENCE_THRESHOLD = 0.80
 ALLOWED_CATEGORIES = (
@@ -77,13 +77,14 @@ def build_review_prompt(row: dict[str, Any]) -> str:
             "- delete: Produkt ist eindeutig nicht im Zielsortiment. Nur bei einem harten, klaren Fehler.",
             "",
             "Zielsortiment:",
-            "- rohes/einfaches Fleisch und Geflügel; auch geschnitten, zerkleinert, geformt, gewürzt oder als Spieß",
+            "- rohes/einfaches Fleisch und Geflügel; auch geschnitten, zerkleinert, geformt, gewürzt, mariniert, als BBQ-Zuschnitt oder als Spieß",
             "- roher/einfacher Fisch und Seafood ohne Sauce/Marinade/Feinkostzubereitung",
             "- frisches Obst, Gemüse, Salat, Kräuter, Pilze und Kartoffeln",
             "- zusätzlich Öl, Sahne, Quark, Milch, TK-Gemüse und Pommes nur mit belegter Marke aus ARO, Chef, Metro, Milram, Schleiz, Quality, economy, Edeka, Foodservice, Henkelmann, Meemken oder Aviko",
             "- Käse und Wurst zusätzlich nur mit einer dieser Marken und Verpackungsgröße ab 500 g",
             "",
-            "Eindeutig außerhalb sind insbesondere Non-Food, Getränke, Saucen, Dips, Pizzasauce, Guacamole, Gewürzgurken, Konserven, eingelegte/marinierte Produkte, Feinkostsalate, fertige Gerichte und Fisch in Sauce/Sahne/Marinade.",
+            "Für Fleisch und Geflügel hat ein explizites frisch/roh/gekühlt Vorrang vor mariniert, Kräutermarinade, gewürzt oder BBQ. Solche rohen Fleischprodukte niemals allein wegen Marinade oder BBQ löschen. Beispiele: Short Ribs BBQ, frisch => keep; Lammhüftsteaks, in Kräutermarinade, frisch => keep.",
+            "Eindeutig außerhalb sind insbesondere Non-Food, Getränke, Saucen, Dips, Pizzasauce, Guacamole, Gewürzgurken, Konserven, Feinkostsalate, fertige Gerichte und Fisch in Sauce/Sahne/Marinade. Gekochtes oder verzehrfertiges Fleisch bleibt ebenfalls außerhalb.",
             "Die Händlernamen Metro/Edeka in Spaltenüberschriften sind kein Markenbeleg. Ein Markenbeleg muss im Produkt oder in der Beschreibung stehen.",
             "",
             "Erlaubte Kategorien: " + ", ".join(ALLOWED_CATEGORIES) + ".",
@@ -306,7 +307,9 @@ def find_header(ws) -> tuple[int, dict[str, int]]:
             for col_idx in range(1, ws.max_column + 1)
             if str(ws.cell(row_idx, col_idx).value or "").strip()
         }
-        if "Kategorie" in headers and "Produkt" in headers:
+        required = {"Kategorie", "Produkt", "Beschreibung"}
+        supplier_headers = {"Metro", "Selgros", "Handelshof", "Edeka"}
+        if required.issubset(headers) and supplier_headers.intersection(headers):
             return row_idx, headers
     raise RuntimeError("Could not find Kategorie/Produkt header row")
 
@@ -340,23 +343,46 @@ def apply_decisions(ws, header_row: int, headers: dict[str, int], decisions: lis
     for row_idx in sorted(deleted_rows, reverse=True):
         ws.delete_rows(row_idx, 1)
 
-    remaining = len(decisions) - len(deleted_rows)
-    _resize_sheet_tables(ws, header_row, remaining)
+    product_col = headers["Produkt"]
+    remaining_rows = [
+        row_idx
+        for row_idx in range(header_row + 1, ws.max_row + 1)
+        if str(ws.cell(row_idx, product_col).value or "").strip()
+    ]
+    remaining = len(remaining_rows)
+    if remaining != len(decisions) - len(deleted_rows):
+        raise RuntimeError(
+            "Final row accounting mismatch after applying decisions: "
+            f"expected {len(decisions) - len(deleted_rows)}, found {remaining}."
+        )
+    _resize_sheet_tables(ws, header_row, max(remaining_rows) if remaining_rows else None)
     _update_article_count(ws, remaining)
-    return {"checked": len(decisions), "corrected": corrected, "deleted": len(deleted_rows), "kept": remaining - corrected}
+    return {"checked": len(decisions), "corrected": corrected, "deleted": len(deleted_rows), "kept": remaining}
 
 
-def _resize_sheet_tables(ws, header_row: int, row_count: int) -> None:
-    if row_count <= 0:
+def _resize_sheet_tables(ws, header_row: int, last_data_row: int | None) -> None:
+    if last_data_row is None:
         for name in list(ws.tables):
             del ws.tables[name]
         ws.auto_filter.ref = None
         return
-    last_row = header_row + row_count
     for table in ws.tables.values():
         min_col, _min_row, max_col, _max_row = range_boundaries(table.ref)
-        table.ref = f"{get_column_letter(min_col)}{header_row}:{get_column_letter(max_col)}{last_row}"
-    ws.auto_filter.ref = f"A{header_row}:{get_column_letter(ws.max_column)}{last_row}"
+        table_ref = (
+            f"{get_column_letter(min_col)}{header_row}:"
+            f"{get_column_letter(max_col)}{last_data_row}"
+        )
+        table.ref = table_ref
+        if table.autoFilter is not None:
+            table.autoFilter.ref = table_ref
+    if ws.tables:
+        # The table owns its AutoFilter. A second worksheet AutoFilter is both
+        # redundant and a frequent source of Excel repair warnings.
+        ws.auto_filter.ref = None
+    else:
+        ws.auto_filter.ref = (
+            f"A{header_row}:{get_column_letter(ws.max_column)}{last_data_row}"
+        )
 
 
 def _update_article_count(ws, row_count: int) -> None:
@@ -372,6 +398,49 @@ def write_audit(path: Path, decisions: list[dict[str, Any]]) -> None:
         for decision in sorted(decisions, key=lambda item: int(item["row_number"])):
             handle.write(json.dumps(decision, ensure_ascii=False, sort_keys=True) + "\n")
     os.replace(tmp_path, path)
+
+
+def verify_customer_workbook(
+    workbook_path: Path,
+    *,
+    expected_product_rows: int | None = None,
+) -> dict[str, Any]:
+    """Fail closed when row accounting or Excel table metadata is inconsistent."""
+    workbook = load_workbook(workbook_path)
+    sheet_name = find_customer_sheet(workbook)
+    ws = workbook[sheet_name]
+    header_row, headers = find_header(ws)
+    product_rows = collect_rows(ws, header_row, headers)
+    product_count = len(product_rows)
+    if expected_product_rows is not None and product_count != expected_product_rows:
+        raise RuntimeError(
+            "Saved customer workbook row mismatch: "
+            f"expected {expected_product_rows}, found {product_count}."
+        )
+
+    last_data_row = max((row_idx for row_idx, _row in product_rows), default=None)
+    for table in ws.tables.values():
+        _min_col, min_row, _max_col, max_row = range_boundaries(table.ref)
+        if min_row != header_row or max_row != last_data_row:
+            raise RuntimeError(
+                f"Excel table {table.displayName!r} has invalid ref {table.ref!r}; "
+                f"expected header row {header_row} and last data row {last_data_row}."
+            )
+        if table.autoFilter is None or table.autoFilter.ref != table.ref:
+            raise RuntimeError(
+                f"Excel table {table.displayName!r} AutoFilter does not match "
+                f"its table range {table.ref!r}."
+            )
+    if ws.tables and ws.auto_filter.ref:
+        raise RuntimeError(
+            "Customer sheet contains a redundant worksheet AutoFilter in addition to its table filter."
+        )
+    return {
+        "sheet": sheet_name,
+        "product_rows": product_count,
+        "header_row": header_row,
+        "tables": len(ws.tables),
+    }
 
 
 def review_workbook_rows(
@@ -447,6 +516,10 @@ def review_workbook_rows(
         ) as handle:
             temporary_path = Path(handle.name)
         workbook.save(temporary_path)
+        verify_customer_workbook(
+            temporary_path,
+            expected_product_rows=stats["kept"],
+        )
         os.replace(temporary_path, workbook_path)
     finally:
         if temporary_path and temporary_path.exists():

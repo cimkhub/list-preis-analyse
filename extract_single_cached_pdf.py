@@ -20,7 +20,11 @@ from src.config import load_config
 from src.convert.pdf_to_images import pdf_to_images
 from src.extract.cached_batch import CachedExtractionTarget, load_downloaded_documents
 from src.extract.text_extract import classify_category
-from src.extract.vision import _raw_items_to_products, configure_gemini, extract_products_from_image
+from src.extract.vision import (
+    _raw_items_to_products,
+    configure_gemini,
+    extract_products_from_image_with_quality_retry,
+)
 from src.report.parsed_csv import PARSED_CSV_FIELDS
 from src.utils.logging_setup import setup_logging
 
@@ -154,7 +158,12 @@ def run_worker(args) -> None:
         min_request_interval_seconds=config.vision_api.min_request_interval_seconds,
     )
 
-    raw_items = extract_products_from_image(str(args.page_image), supplier=args.supplier)
+    raw_items = extract_products_from_image_with_quality_retry(
+        str(args.page_image),
+        supplier=args.supplier,
+        page_number=page_number_from_path(args.page_image),
+        source_file=args.source_file or "",
+    )
     products = _raw_items_to_products(
         raw_items,
         supplier=args.supplier,

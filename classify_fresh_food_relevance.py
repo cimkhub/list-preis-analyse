@@ -397,9 +397,37 @@ def explicit_non_fresh_exclusion_reason(row: dict[str, str]) -> str | None:
     if any(re.search(pattern, text) for pattern in PREPARED_FISH_PATTERNS):
         return "Prepared Fish"
     for reason, patterns in NON_FRESH_EXCLUSION_RULES:
-        if any(re.search(pattern, text) for pattern in patterns):
+        matched_patterns = [pattern for pattern in patterns if re.search(pattern, text)]
+        if not matched_patterns:
+            continue
+        if reason == "Prepared" and _is_explicitly_fresh_raw_meat(row):
+            # A marinade or BBQ seasoning does not turn a clearly fresh/raw
+            # meat cut into a ready-to-eat convenience product. Other prepared
+            # signals such as salad/deli/ready-to-eat still exclude the row.
+            matched_patterns = [
+                pattern
+                for pattern in matched_patterns
+                if "marin" not in pattern
+            ]
+        if matched_patterns:
             return reason
     return None
+
+
+def _is_explicitly_fresh_raw_meat(row: dict[str, str]) -> bool:
+    category = str(row.get("category") or "").casefold().replace("-", "_").replace(" ", "_")
+    if category not in {"fleisch", "meat", "gefluegel", "geflügel", "poultry"}:
+        return False
+    product_and_description = " ".join(
+        str(row.get(field) or "")
+        for field in ["product_name", "description"]
+    ).casefold()
+    return bool(
+        re.search(
+            r"\b(frisch(?:e[nrms]?)?|fresh|roh(?:e[nrms]?)?|raw|gekühlt|gekuehlt|chilled)\b",
+            product_and_description,
+        )
+    )
 
 
 def _row_text(row: dict[str, str]) -> str:
@@ -580,14 +608,17 @@ def build_prompt(row: dict[str, str]) -> str:
             "",
             "Hard exclusions: answer Nein when the offered product is any of these, even if category or product name contains fish, vegetables, fruit, cream, or a required brand:",
             "- non-food or household goods, for example Toilettenpapier, Küchenrolle, cleaning products, packaging, kitchen equipment",
-            "- prepared, ready-to-eat, marinated, sauced, pickled, jarred, canned, preserved, deli, salad, dip, spread, or convenience products",
+            "- prepared, cooked, ready-to-eat, sauced, pickled, jarred, canned, preserved, deli, salad, dip, spread, or convenience products",
             "- fish/seafood with sauce, marinade, cream/Sahne, salad preparation, dressing, or deli preparation",
             "- processed fruit/vegetable products such as Pizzasauce, Guacamole, Gewürzgurken, pickled vegetables, antipasti, dips, spreads, sauces",
-            "Negative examples: Delikatess-Sahne-Heringsfilets => Nein|Prepared Fish; marinierte Produkte => Nein|Prepared; Pizzasauce => Nein|Sauce; Guacamole => Nein|Dip; Gewürzgurken => Nein|Preserved; Toilettenpapier => Nein|Non Food.",
+            "Negative examples: Delikatess-Sahne-Heringsfilets => Nein|Prepared Fish; marinierter Fisch => Nein|Prepared Fish; Pizzasauce => Nein|Sauce; Guacamole => Nein|Dip; Gewürzgurken => Nein|Preserved; Toilettenpapier => Nein|Non Food.",
             "",
             "Relevant = Ja if the offered product itself is a core fresh-food product, for example:",
             "- meat or poultry",
-            "- raw meat remains relevant when cut, minced, formed, skewered, or dry-seasoned; examples include Cevapcici, burger patties, meat strips, skewers, and BBQ cuts without sauce or marinade",
+            "- raw/fresh meat remains relevant when cut, minced, formed, skewered, seasoned, BBQ-seasoned, or marinated",
+            "For meat and poultry only: an explicit fresh/raw/chilled signal has priority over words such as marinated, Kräutermarinade, seasoned, gewürzt, BBQ, skewer, formed, or minced, as long as the offered product is still recognizably raw meat and is not cooked or ready-to-eat.",
+            "Positive examples: Short Ribs BBQ, frisch => Ja|Meat; Lammhüftsteaks, in Kräutermarinade, frisch => Ja|Meat; Cevapcici, roh/gekühlt => Ja|Meat.",
+            "This meat exception does not apply to fish/seafood, fruit, or vegetables. Marinated fish, pickled vegetables, sauces, deli salads, cooked meat, and ready-to-eat meals remain excluded.",
             "- fish or seafood",
             "- vegetables, salads, herbs, mushrooms, or potatoes",
             "- fruit",

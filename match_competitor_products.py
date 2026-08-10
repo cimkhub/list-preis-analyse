@@ -1119,47 +1119,16 @@ def dedupe_same_supplier_products(
     pair_workers: int,
     top_k: int,
 ) -> tuple[pd.DataFrame, int]:
-    df, deterministic_removed = dedupe_exact_same_supplier_offers(df)
-    candidates = generate_same_supplier_duplicate_candidates(df, attributes, embeddings, top_k)
-    if not candidates:
-        return df, deterministic_removed
-
-    print(f"Same-supplier duplicate candidates: {len(candidates)}")
-    pair_rows, _ = judge_pairs(
-        candidates,
-        df,
-        attributes,
-        caches,
-        pair_client,
-        force,
-        skip_llm,
-        pair_workers,
+    # Similarity/LLM matches identify product families, not duplicate offers.
+    # Deleting one of two same-supplier rows because it has a later validity
+    # period destroys offer history (Forelle, Weißkohl, Cherry tomatoes). Only
+    # fully identical commercial offers may be removed here.
+    df, exact_removed = dedupe_exact_same_supplier_offers(df)
+    print(
+        "Same-supplier fuzzy duplicate deletion disabled; "
+        "only exact commercial offer duplicates are removed"
     )
-    duplicate_edges = [
-        row for row in pair_rows
-        if same_supplier_duplicate_decision(row)
-    ]
-    if not duplicate_edges:
-        return df, deterministic_removed
-
-    duplicate_groups = build_duplicate_groups(df["product_id"].tolist(), duplicate_edges)
-    row_by_id = {row["product_id"]: row for row in df.to_dict("records")}
-    keep_ids: set[str] = set()
-    remove_ids: set[str] = set()
-    for group in duplicate_groups:
-        products = [row_by_id[pid] for pid in group if pid in row_by_id]
-        if len(products) < 2:
-            continue
-        keeper = choose_longest_valid_offer(products)
-        keep_ids.add(keeper["product_id"])
-        remove_ids.update(p["product_id"] for p in products if p["product_id"] != keeper["product_id"])
-
-    if not remove_ids:
-        return df, deterministic_removed
-
-    kept = df.loc[~df["product_id"].isin(remove_ids)].copy().reset_index(drop=True)
-    print_same_supplier_dedupe_summary(row_by_id, keep_ids, remove_ids)
-    return kept, deterministic_removed + len(remove_ids)
+    return df, exact_removed
 
 
 def dedupe_exact_same_supplier_offers(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
@@ -1189,20 +1158,30 @@ def dedupe_exact_same_supplier_offers(df: pd.DataFrame) -> tuple[pd.DataFrame, i
 
 def exact_same_supplier_offer_key(row: dict[str, Any]) -> tuple[str, ...] | None:
     product = get(row, "product") or get(row, "product_name")
-    if not product.strip():
+    supplier = normalize_supplier(get(row, "supplier_norm") or get(row, "supplier"))
+    price = duplicate_key_number(get(row, "price"))
+    quantity = duplicate_key_number(get(row, "quantity"))
+    unit = duplicate_key_text(get(row, "unit"))
+    valid_from = str(get(row, "valid_from")).strip()
+    valid_to = str(get(row, "valid_to")).strip()
+    # Missing commercial identity fields are not proof of equality. Keeping a
+    # possible duplicate is safer than deleting a real offer.
+    if not all([supplier, product.strip(), price, quantity, unit, valid_from, valid_to]):
         return None
     return (
-        normalize_supplier(get(row, "supplier_norm") or get(row, "supplier")),
+        supplier,
         duplicate_key_text(get(row, "category")),
         duplicate_key_text(get(row, "brand")),
         duplicate_key_text(product),
         duplicate_key_text(get(row, "description")),
         duplicate_key_text(get(row, "origin")),
-        duplicate_key_number(get(row, "price")),
+        price,
+        quantity,
+        unit,
         duplicate_key_number(get(row, "price_per_kg")),
         duplicate_key_price_tiers(get(row, "price_tiers")),
-        get(row, "valid_from"),
-        get(row, "valid_to"),
+        valid_from,
+        valid_to,
     )
 
 

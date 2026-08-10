@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
 import random
+import re
 import threading
 import time
 from pathlib import Path
@@ -15,6 +16,22 @@ from src.models import RawProduct
 from src.utils.logging_setup import log_event
 
 logger = logging.getLogger("birkenhof.extract.vision")
+
+QUALITY_RETRY_MODEL = "gemini-3.6-flash"
+PACKAGING_UNITS_REQUIRING_QUANTITY = {
+    "becher",
+    "beutel",
+    "dose",
+    "eimer",
+    "flasche",
+    "kanister",
+    "karton",
+    "kasten",
+    "kiste",
+    "korb",
+    "packung",
+    "schale",
+}
 
 _client = None
 _settings = {
@@ -61,6 +78,7 @@ def analyze_image_json(
     model_name: str | None = None,
     max_retries: int | None = None,
     temperature: float | None = None,
+    include_temperature: bool = True,
     operation: str = "vision_json",
     **context,
 ):
@@ -70,7 +88,8 @@ def analyze_image_json(
 
     model_name = _resolve_setting("model_name", model_name)
     max_retries = _resolve_setting("max_retries", max_retries)
-    temperature = _resolve_setting("temperature", temperature)
+    if include_temperature:
+        temperature = _resolve_setting("temperature", temperature)
     min_request_interval_seconds = _resolve_setting("min_request_interval_seconds", None)
     call_started = time.perf_counter()
 
@@ -93,17 +112,19 @@ def analyze_image_json(
         attempt_started = time.perf_counter()
         try:
             _wait_for_gemini_rate_limit(min_request_interval_seconds)
+            config_kwargs = {
+                "system_instruction": system_prompt,
+                "response_mime_type": "application/json",
+            }
+            if include_temperature:
+                config_kwargs["temperature"] = temperature
             response = _client.models.generate_content(
                 model=model_name,
                 contents=[
                     prompt,
                     Part.from_bytes(data=img_bytes, mime_type=mime_type),
                 ],
-                config=GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=temperature,
-                    response_mime_type="application/json",
-                ),
+                config=GenerateContentConfig(**config_kwargs),
             )
             text = response.text.strip()
 
@@ -244,6 +265,159 @@ def extract_products_from_image(
     return products
 
 
+def page_extraction_quality_issues(raw_items: list[dict]) -> list[str]:
+    """Return retry triggers before lossy RawProduct conversion.
+
+    Price-less entries would otherwise be silently skipped and missing unit or
+    quantity values would be defaulted. Checking the raw page result preserves
+    the evidence needed to decide whether the complete page needs one retry.
+    """
+    issues: list[str] = []
+    for index, item in enumerate(raw_items, 1):
+        if not isinstance(item, dict):
+            issues.append(f"item_{index}:invalid_item")
+            continue
+        if not _positive_number(item.get("price")):
+            issues.append(f"item_{index}:missing_price")
+        unit = str(item.get("unit") or "").strip().casefold()
+        if not _positive_number(item.get("quantity")) and _quantity_should_be_present(item, unit):
+            issues.append(f"item_{index}:missing_quantity")
+        if unit in {"", "unknown", "null", "none"}:
+            issues.append(f"item_{index}:missing_unit")
+    return issues
+
+
+def _positive_number(value) -> bool:
+    if value is None or isinstance(value, bool):
+        return False
+    try:
+        return float(str(value).strip().replace(",", ".")) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _quantity_should_be_present(item: dict, unit: str) -> bool:
+    if unit in PACKAGING_UNITS_REQUIRING_QUANTITY:
+        return True
+    visible_text = " ".join(
+        str(item.get(field) or "")
+        for field in ("product_name", "description")
+    ).casefold()
+    return bool(
+        re.search(
+            r"(?<!\d)\d+(?:[.,]\d+)?\s*(?:kg|g|l|ml|stück|stueck|x)\b",
+            visible_text,
+        )
+    )
+
+
+def _product_items(result) -> list[dict] | None:
+    if result is None:
+        return None
+    return result if isinstance(result, list) else [result]
+
+
+def extract_products_from_image_with_quality_retry(
+    image_path: str,
+    supplier: str,
+    model_name: str | None = None,
+    max_retries: int | None = None,
+    temperature: float | None = None,
+    *,
+    page_number: int | None = None,
+    source_file: str = "",
+) -> list[dict]:
+    """Extract one page and atomically replace it after one quality retry.
+
+    The retry uses the exact same output prompt/schema with Gemini 3.6 Flash.
+    It is called at most once per page and never merged field-by-field with the
+    primary result. A failed or unexpectedly empty retry keeps the primary page
+    to prevent destructive data loss.
+    """
+    primary_items = extract_products_from_image(
+        image_path,
+        supplier,
+        model_name=model_name,
+        max_retries=max_retries,
+        temperature=temperature,
+    )
+    issues = page_extraction_quality_issues(primary_items)
+    if not issues:
+        return primary_items
+
+    primary_model = _resolve_setting("model_name", model_name)
+    context = {
+        "supplier": supplier,
+        "source_file": source_file,
+        "source_page": page_number,
+        "primary_model": primary_model,
+        "retry_model": QUALITY_RETRY_MODEL,
+        "quality_issues": issues,
+        "primary_product_count": len(primary_items),
+    }
+    logger.warning(
+        "Page %s has incomplete price/amount data; retrying complete page once with %s (%s)",
+        page_number if page_number is not None else Path(image_path).name,
+        QUALITY_RETRY_MODEL,
+        ", ".join(issues),
+    )
+    log_event(
+        logger,
+        f"Gemini quality retry started for {Path(image_path).name}",
+        event="vision_page_quality_retry",
+        status="start",
+        **context,
+    )
+
+    retry_result = analyze_image_json(
+        image_path=image_path,
+        prompt=get_extraction_prompt(supplier),
+        system_prompt=SYSTEM_PROMPT,
+        model_name=QUALITY_RETRY_MODEL,
+        # Exactly one additional page analysis, not the normal retry loop.
+        max_retries=1,
+        include_temperature=False,
+        operation="product_extraction_quality_retry",
+        **context,
+    )
+    retry_items = _product_items(retry_result)
+    if retry_items is None or (primary_items and not retry_items):
+        status = "failed" if retry_items is None else "rejected_empty"
+        logger.error(
+            "Gemini quality retry %s for page %s; retaining primary page result",
+            status,
+            page_number if page_number is not None else Path(image_path).name,
+        )
+        log_event(
+            logger,
+            f"Gemini quality retry did not replace {Path(image_path).name}",
+            event="vision_page_quality_retry",
+            level=logging.ERROR,
+            status=status,
+            **context,
+        )
+        return primary_items
+
+    remaining_issues = page_extraction_quality_issues(retry_items)
+    log_event(
+        logger,
+        f"Gemini quality retry replaced complete page {Path(image_path).name}",
+        event="vision_page_quality_retry",
+        status="replaced",
+        retry_product_count=len(retry_items),
+        remaining_quality_issues=remaining_issues,
+        **context,
+    )
+    logger.info(
+        "Replaced complete primary extraction for page %s with %d %s products; remaining issues=%d",
+        page_number if page_number is not None else Path(image_path).name,
+        len(retry_items),
+        QUALITY_RETRY_MODEL,
+        len(remaining_issues),
+    )
+    return retry_items
+
+
 def _raw_items_to_products(
     raw_items: list[dict],
     *,
@@ -363,12 +537,14 @@ def extract_products_from_pdf_images(
     with ThreadPoolExecutor(max_workers=min(max_concurrent_requests, len(image_paths))) as executor:
         future_map = {
             executor.submit(
-                extract_products_from_image,
+                extract_products_from_image_with_quality_retry,
                 img_path,
                 supplier,
                 model_name=model_name,
                 max_retries=max_retries,
                 temperature=temperature,
+                page_number=i,
+                source_file=source_file,
             ): (i, img_path)
             for i, img_path in enumerate(image_paths, 1)
         }

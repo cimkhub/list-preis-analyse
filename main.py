@@ -620,13 +620,26 @@ def run_pipeline(week: int | None = None, year: int | None = None,
         try:
             from openpyxl import load_workbook
             from add_market_forecast_signals import finalize_customer_workbook
+            from final_row_quality_check import verify_customer_workbook
 
             workbook = load_workbook(matched_competitor_path)
             final_sheet = finalize_customer_workbook(workbook, matched_competitor_path)
             workbook.save(matched_competitor_path)
-            logger.info("Final customer workbook reduced to one sheet: %s", final_sheet)
+            workbook_check = verify_customer_workbook(
+                matched_competitor_path,
+                expected_product_rows=final_review_stats["kept"],
+            )
+            logger.info(
+                "Final customer workbook reduced to one sheet: %s "
+                "(verified rows=%d, tables=%d)",
+                final_sheet,
+                workbook_check["product_rows"],
+                workbook_check["tables"],
+            )
         except Exception as exc:
-            logger.warning("Final customer workbook cleanup failed: %s", exc, exc_info=True)
+            raise RuntimeError(
+                f"Final customer workbook cleanup/integrity check failed: {exc}"
+            ) from exc
 
         # Stage 4e: Upload the final customer workbook to the shared LIST OneDrive folders.
         # This uses the browser UI because the client folder is accessible in the browser,

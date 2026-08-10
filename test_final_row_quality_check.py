@@ -72,7 +72,7 @@ def test_final_review_corrects_category_deletes_only_hard_error_and_writes_audit
         "checked": 3,
         "corrected": 1,
         "deleted": 1,
-        "kept": 1,
+        "kept": 2,
         "sheet": "Final Output Short",
         "model": final_review.DEFAULT_FLASH_MODEL,
         "audit_path": str(audit_path),
@@ -84,6 +84,8 @@ def test_final_review_corrects_category_deletes_only_hard_error_and_writes_audit
     assert ws["B9"].value == "Tomaten"
     assert ws["B10"].value is None
     assert ws.tables["Final_Output_Short_tbl"].ref == "A7:D9"
+    assert ws.tables["Final_Output_Short_tbl"].autoFilter.ref == "A7:D9"
+    assert ws.auto_filter.ref is None
     assert "Artikelgruppen: 2" in ws["D3"].value
 
     audit = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
@@ -185,3 +187,49 @@ def test_review_failure_aborts_without_modifying_workbook(tmp_path):
 
     wb = load_workbook(workbook_path)
     assert wb["Final Output Short"]["B9"].value == "Riesling Sekt"
+
+
+def test_decorative_partial_header_is_not_reviewed_or_used_for_table_range(tmp_path):
+    workbook_path = tmp_path / "Artikelvergleich KW32.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Final Output Short"
+    ws["D3"] = "Erstellt am 09.08.2026 | Artikelgruppen: 1"
+    for col, header in enumerate(["Kategorie", "Produkt", "Beschreibung"], 1):
+        ws.cell(5, col, header)
+    headers = ["Kategorie", "Produkt", "Beschreibung", "Metro"]
+    for col, header in enumerate(headers, 1):
+        ws.cell(7, col, header)
+    for col, value in enumerate(["Fleisch", "Short Ribs BBQ", "frisch", "9,99 €"], 1):
+        ws.cell(8, col, value)
+    ws.add_table(Table(displayName="Final_Output_Short_tbl", ref="A7:D8"))
+    wb.save(workbook_path)
+
+    seen_products = []
+
+    def keep_caller(**kwargs):
+        seen_products.append(kwargs["row"]["Produkt"])
+        return {
+            "action": "keep",
+            "category": None,
+            "hard_error": False,
+            "reason": "Frisches Fleisch",
+            "confidence": 0.99,
+        }
+
+    stats = final_review.review_workbook_rows(
+        workbook_path,
+        api_key="test-key",
+        workers=1,
+        max_retries=1,
+        caller=keep_caller,
+    )
+
+    assert seen_products == ["Short Ribs BBQ"]
+    assert stats["checked"] == 1
+    assert stats["kept"] == 1
+    wb = load_workbook(workbook_path)
+    ws = wb["Final Output Short"]
+    table = ws.tables["Final_Output_Short_tbl"]
+    assert table.ref == "A7:D8"
+    assert table.autoFilter.ref == table.ref
