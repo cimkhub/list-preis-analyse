@@ -77,8 +77,8 @@ AUTO_MERGE_CLOSE_THRESHOLD = 88
 PAIR_JUDGE_WORKERS = 25
 ATTRIBUTE_CACHE_VERSION = 3
 EMBEDDING_CACHE_VERSION = 3
-PAIR_CACHE_VERSION = 4
-SECOND_JUDGE_CACHE_VERSION = 1
+PAIR_CACHE_VERSION = 5
+SECOND_JUDGE_CACHE_VERSION = 2
 SAME_SUPPLIER_DEDUPE_SIMILARITY = 0.82
 
 SUPPLIER_ORDER = ["Metro", "Selgros", "Handelshof", "Edeka"]
@@ -129,7 +129,7 @@ def main() -> None:
         args.pair_workers,
         args.top_k,
     )
-    print(f"Same-supplier duplicate products removed: {removed_same_supplier}")
+    print(f"Same-supplier rows removed before grouping: {removed_same_supplier}")
 
     pinecone_store = None
     if not args.disable_pinecone and not args.skip_llm:
@@ -141,7 +141,7 @@ def main() -> None:
     elif args.skip_llm:
         print("Pinecone vector store: skipped because --skip-llm is active")
 
-    candidates = generate_candidate_pairs(
+    cross_supplier_candidates = generate_candidate_pairs(
         df,
         attributes,
         embeddings,
@@ -149,7 +149,19 @@ def main() -> None:
         args.similarity_threshold,
         pinecone_store=pinecone_store,
     )
-    print(f"Candidate pairs generated: {len(candidates)}")
+    same_supplier_candidates = generate_same_supplier_duplicate_candidates(
+        df,
+        attributes,
+        embeddings,
+        args.top_k,
+    )
+    candidates = merge_candidate_lists(cross_supplier_candidates, same_supplier_candidates)
+    print(
+        "Candidate pairs generated: "
+        f"{len(candidates)} total "
+        f"({len(cross_supplier_candidates)} cross-supplier, "
+        f"{len(same_supplier_candidates)} same-supplier)"
+    )
 
     pair_rows, hard_blocked_count = judge_pairs(
         candidates,
@@ -176,13 +188,34 @@ def main() -> None:
     )
 
     clusters = build_clusters(df, attributes, pair_rows)
+    validate_cluster_partition(df, clusters)
     print(f"Clusters created: {len(clusters)}")
 
-    matched_rows, review_rows = build_output_rows(df, attributes, pair_rows, clusters)
+    offer_grouping_audit: list[dict[str, Any]] = []
+    matched_rows, review_rows = build_output_rows(
+        df,
+        attributes,
+        pair_rows,
+        clusters,
+        grouping_audit=offer_grouping_audit,
+    )
+    validate_offer_accounting(df, offer_grouping_audit)
+    collapsed_offer_rows = sum(max(len(item.get("merged_product_ids", [])) - 1, 0) for item in offer_grouping_audit)
+    print(f"Offer representations collapsed in output: {collapsed_offer_rows}")
+    print(f"Unique offers written: {len(df) - collapsed_offer_rows}")
     print(f"Review rows created: {len(review_rows)}")
 
     attribute_rows = build_attribute_debug_rows(df, attributes)
-    write_excel(output_path, matched_rows, review_rows, pair_rows, attribute_rows, Path(args.logo) if args.logo else None)
+    write_excel(
+        output_path,
+        matched_rows,
+        review_rows,
+        pair_rows,
+        attribute_rows,
+        Path(args.logo) if args.logo else None,
+        offer_grouping_audit=offer_grouping_audit,
+    )
+    write_offer_grouping_audit(output_path, offer_grouping_audit)
     print(f"Excel written: {output_path}")
     if args.upload_onedrive:
         from upload_to_onedrive import upload_to_onedrive
@@ -1119,16 +1152,14 @@ def dedupe_same_supplier_products(
     pair_workers: int,
     top_k: int,
 ) -> tuple[pd.DataFrame, int]:
-    # Similarity/LLM matches identify product families, not duplicate offers.
-    # Deleting one of two same-supplier rows because it has a later validity
-    # period destroys offer history (Forelle, Weißkohl, Cherry tomatoes). Only
-    # fully identical commercial offers may be removed here.
-    df, exact_removed = dedupe_exact_same_supplier_offers(df)
+    # Nothing is deleted before variant grouping. Repeated extraction rows are
+    # coalesced losslessly at offer level after cluster assignment, where all
+    # retained fields and source IDs can be audited.
     print(
-        "Same-supplier fuzzy duplicate deletion disabled; "
-        "only exact commercial offer duplicates are removed"
+        "Same-supplier pre-clustering deletion disabled; "
+        "offer representations are coalesced after variant grouping"
     )
-    return df, exact_removed
+    return df.copy().reset_index(drop=True), 0
 
 
 def dedupe_exact_same_supplier_offers(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
@@ -1223,49 +1254,72 @@ def generate_same_supplier_duplicate_candidates(
     top_k: int,
 ) -> list[dict[str, Any]]:
     rows = df.to_dict("records")
-    ids = [row["product_id"] for row in rows]
     candidate_map: dict[tuple[str, str], dict[str, Any]] = {}
     by_supplier: dict[str, list[int]] = defaultdict(list)
     for idx, row in enumerate(rows):
         by_supplier[row["supplier_norm"]].append(idx)
 
     for supplier, indexes in by_supplier.items():
-        for i in indexes:
+        # Exact product names are always candidates. Description, price,
+        # quantity, calibre and validity belong to a variant/offer and must not
+        # prevent two rows for the same supplier from being compared.
+        for position, i in enumerate(indexes):
+            row_a = rows[i]
+            name_a = exact_product_name_key(row_a)
+            if not name_a:
+                continue
+            for j in indexes[position + 1:]:
+                row_b = rows[j]
+                if name_a != exact_product_name_key(row_b):
+                    continue
+                sim = vector_similarity(
+                    embeddings[row_a["product_id"]],
+                    embeddings[row_b["product_id"]],
+                )
+                add_matching_candidate(
+                    candidate_map,
+                    row_a,
+                    row_b,
+                    attributes,
+                    sim,
+                    "same_supplier_exact_product_name",
+                )
+
+        # Compute all same-supplier similarities in one BLAS-backed matrix
+        # operation. This avoids millions of Python-level vector dot products
+        # on a normal weekly run.
+        supplier_matrix = np.vstack([embeddings[rows[index]["product_id"]] for index in indexes]).astype(float)
+        norms = np.linalg.norm(supplier_matrix, axis=1, keepdims=True)
+        normalized_matrix = np.divide(
+            supplier_matrix,
+            norms,
+            out=np.zeros_like(supplier_matrix),
+            where=norms != 0,
+        )
+        similarity_matrix = normalized_matrix @ normalized_matrix.T
+        for local_i, i in enumerate(indexes):
             row_a = rows[i]
             scored: list[tuple[float, int, str]] = []
-            for j in indexes:
-                if i == j:
+            for local_j in np.argsort(similarity_matrix[local_i])[::-1]:
+                if local_i == int(local_j):
                     continue
-                row_b = rows[j]
-                if same_source_offer(row_a, row_b):
-                    continue
-                sim = vector_similarity(embeddings[ids[i]], embeddings[ids[j]])
-                if sim >= SAME_SUPPLIER_DEDUPE_SIMILARITY or exact_name_key(row_a) == exact_name_key(row_b):
-                    scored.append((sim, j, "same_supplier_vector_similarity"))
+                sim = float(similarity_matrix[local_i, local_j])
+                if sim < SAME_SUPPLIER_DEDUPE_SIMILARITY:
+                    break
+                scored.append((sim, indexes[int(local_j)], "same_supplier_vector_similarity"))
+                if len(scored) >= top_k:
+                    break
 
-            for sim, j, source in sorted(scored, reverse=True)[:top_k]:
+            for sim, j, source in scored:
                 row_b = rows[j]
-                key = tuple(sorted([row_a["product_id"], row_b["product_id"]]))
-                if key in candidate_map and sim <= candidate_map[key]["similarity"]:
-                    continue
-                attr_a = attributes[row_a["product_id"]]
-                attr_b = attributes[row_b["product_id"]]
-                candidate_map[key] = {
-                    "product_id_a": row_a["product_id"],
-                    "product_id_b": row_b["product_id"],
-                    "supplier_a": supplier,
-                    "supplier_b": supplier,
-                    "name_a": display_product_name(row_a),
-                    "name_b": display_product_name(row_b),
-                    "base_product_a": attr_a.get("base_product"),
-                    "base_product_b": attr_b.get("base_product"),
-                    "variant_a": attr_a.get("variant"),
-                    "variant_b": attr_b.get("variant"),
-                    "processing_a": attr_a.get("processing"),
-                    "processing_b": attr_b.get("processing"),
-                    "similarity": round(float(sim), 4),
-                    "candidate_source": source,
-                }
+                add_matching_candidate(
+                    candidate_map,
+                    row_a,
+                    row_b,
+                    attributes,
+                    sim,
+                    source,
+                )
     return list(candidate_map.values())
 
 
@@ -1276,14 +1330,54 @@ def same_source_offer(row_a: dict[str, Any], row_b: dict[str, Any]) -> bool:
     )
 
 
-def exact_name_key(row: dict[str, Any]) -> str:
-    text = " ".join([
-        get(row, "supplier_norm"),
-        get(row, "brand"),
-        get(row, "product") or get(row, "product_name"),
-        get(row, "description"),
-    ])
-    return re.sub(r"[^a-z0-9äöüß]+", " ", text.casefold()).strip()
+def exact_product_name_key(row: dict[str, Any]) -> str:
+    return duplicate_key_text(get(row, "product") or get(row, "product_name"))
+
+
+def add_matching_candidate(
+    candidate_map: dict[tuple[str, str], dict[str, Any]],
+    row_a: dict[str, Any],
+    row_b: dict[str, Any],
+    attributes: dict[str, dict[str, Any]],
+    similarity: float,
+    source: str,
+) -> None:
+    key = tuple(sorted([row_a["product_id"], row_b["product_id"]]))
+    existing = candidate_map.get(key)
+    source_priority = source == "same_supplier_exact_product_name"
+    if existing and existing.get("candidate_source") == "same_supplier_exact_product_name" and not source_priority:
+        return
+    if existing and not source_priority and similarity <= float(existing.get("similarity") or 0):
+        return
+    attr_a = attributes[row_a["product_id"]]
+    attr_b = attributes[row_b["product_id"]]
+    candidate_map[key] = {
+        "product_id_a": row_a["product_id"],
+        "product_id_b": row_b["product_id"],
+        "supplier_a": row_a["supplier_norm"],
+        "supplier_b": row_b["supplier_norm"],
+        "name_a": display_product_name(row_a),
+        "name_b": display_product_name(row_b),
+        "base_product_a": attr_a.get("base_product"),
+        "base_product_b": attr_b.get("base_product"),
+        "variant_a": attr_a.get("variant"),
+        "variant_b": attr_b.get("variant"),
+        "processing_a": attr_a.get("processing"),
+        "processing_b": attr_b.get("processing"),
+        "similarity": round(float(similarity), 4),
+        "candidate_source": source,
+    }
+
+
+def merge_candidate_lists(*candidate_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for candidates in candidate_lists:
+        for candidate in candidates:
+            key = tuple(sorted([candidate["product_id_a"], candidate["product_id_b"]]))
+            current = merged.get(key)
+            if current is None or float(candidate.get("similarity") or 0) > float(current.get("similarity") or 0):
+                merged[key] = candidate
+    return list(merged.values())
 
 
 def same_supplier_duplicate_decision(row: dict[str, Any]) -> bool:
@@ -1392,6 +1486,23 @@ def judge_pairs(
         pair_key = make_pair_key(a_id, b_id)
         hard_reasons: list[str] = []
         soft_warnings: list[str] = []
+        if cand.get("candidate_source") == "same_supplier_exact_product_name" and cand.get("supplier_a") == cand.get("supplier_b"):
+            decision = {
+                "pair_key": pair_key,
+                "schema_version": PAIR_CACHE_VERSION,
+                "product_id_a": a_id,
+                "product_id_b": b_id,
+                "decision": "exact_match",
+                "confidence": 99,
+                "canonical_name": cand.get("name_a") or cand.get("name_b") or "",
+                "matching_attributes": ["same supplier", "same normalized product name"],
+                "conflicting_attributes": [],
+                "reason": "Same supplier and identical normalized product name; variant conflicts are checked at cluster level.",
+                "should_human_review": False,
+                "model": "deterministic-identity",
+            }
+            out[idx] = pair_debug_row(cand, hard_reasons, soft_warnings, decision)
+            continue
         cached = caches.pairs.get(pair_key)
         cached_model_matches = (
             not pair_client
@@ -1514,6 +1625,15 @@ Erlaubte final_action:
 - REVIEW: Nur wenn es wirklich nicht zuverlässig entscheidbar ist.
 
 Bitte nutze REVIEW sehr sparsam.
+
+Verbindliche Variantenregeln:
+- Unterschiedliches Kaliber oder unterschiedliche Packungsgröße erzeugt KEINE eigene Variante.
+- Ein fehlendes Attribut darf mit einem bekannten Attribut zusammengeführt werden, solange kein Widerspruch besteht.
+- Zwei unterschiedliche bekannte Herkünfte bleiben getrennt. Herkunftskombinationen wie "UA, RO" sind ein eigener Wert.
+- Zwei unterschiedliche bekannte Marken bleiben getrennt; eine fehlende Marke allein verhindert MERGE nicht.
+- Duroc, Berkshire und vergleichbare klar benannte Rassen/Premiumlinien bleiben von generischer Ware getrennt.
+- Frisch und tiefgekühlt bleiben getrennt.
+- Preis, Händler, Menge, Verpackungsart und Gültigkeitszeitraum sind Angebotsdaten. Unterschiedliche Werte bleiben als mehrere Angebote in derselben Produktzeile erhalten.
 
 Beispiele:
 - "Kalbs Steakhüfte Hell 1.2 Kg" vs "Kalbs-Steakhüfte Hell" => MERGE.
@@ -1702,7 +1822,7 @@ PAIR_PROMPT = """Du vergleichst Produkte aus deutschen Großhandels-Werbeprospek
 
 Entscheide, ob Produkt A und Produkt B in dieselbe Vergleichszeile gehören.
 Die Vektorsuche hat diese zwei Produkte nur als Kandidaten vorgeschlagen. Du bist die finale Entscheidung.
-Die Produkte können aus unterschiedlichen Wettbewerbern kommen oder vom selben Supplier aus unterschiedlichen Prospekten. Wenn es derselbe Supplier und derselbe Artikel ist, bewerte es trotzdem als exact_match; der technische Prozess behält danach nur das länger gültige Angebot.
+Die Produkte können aus unterschiedlichen Wettbewerbern kommen oder vom selben Supplier aus demselben oder aus unterschiedlichen Prospekten. Wenn es derselbe Supplier und dieselbe Produktvariante ist, bewerte es trotzdem als exact_match. Der technische Prozess führt die Produktzeile zusammen und bewahrt alle unterschiedlichen Angebote vollständig auf.
 
 Antworte inhaltlich auf Deutsch. Gib aber das JSON-Schema exakt mit den vorgegebenen englischen Schlüsseln zurück.
 
@@ -1726,6 +1846,16 @@ Wichtige Beispiele:
 - "Olivenöl" und "Sonnenblumenöl" = same_family_not_comparable, nicht mergen.
 - "Pommes Frites" und "Süßkartoffel-Pommes" = same_family_not_comparable, nicht mergen.
 - "Broccoli" und "Blumenkohl" = same_family_not_comparable, nicht mergen.
+
+Verbindliche Variantenregeln:
+- Unterschiedliches Kaliber erzeugt KEINE eigene Variante und ist kein Grund gegen einen Match.
+- Unterschiedliche Packungsgröße, Verpackungsart, Preis oder Gültigkeitszeitraum erzeugen KEINE eigene Variante. Das sind getrennte Angebote derselben Variante.
+- Fehlt ein Attribut nur auf einer Seite, darf gematcht werden, solange kein anderer Widerspruch besteht.
+- Unterschiedliche bekannte Herkunft = nicht mergen. Gleiche Herkunft = mergen. Bekannte Herkunft plus fehlende Herkunft darf gemergt werden. Kombinationen wie "UA, RO" gelten als eigener Herkunftswert.
+- Unterschiedliche bekannte Marken = nicht mergen. Eine fehlende Marke allein ist kein Trennungsgrund.
+- Duroc, Berkshire und vergleichbare klar benannte Rassen/Premiumlinien = von generischer Ware getrennte Variante.
+- Frisch und tiefgekühlt = nicht mergen.
+- Zertifizierungen sind Attribute und dürfen nicht stillschweigend aus dem kanonischen Namen oder den Quelldaten entfernt werden.
 
 Nutze vor allem:
 - Produktname, getrennte Felder brand/product, Beschreibung, Herkunft, Qualität, Zuschnitt/Sorte, Verarbeitungsart und Menge.
@@ -1896,7 +2026,9 @@ def judge_pair_fallback(pair_key: str, cand: dict[str, Any], attr_a: dict[str, A
 
 def build_clusters(df: pd.DataFrame, attributes: dict[str, dict[str, Any]], pair_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ids = df["product_id"].tolist()
+    row_by_id = {row["product_id"]: row for row in df.to_dict("records")}
     parent = {pid: pid for pid in ids}
+    members = {pid: {pid} for pid in ids}
 
     def find(x: str) -> str:
         while parent[x] != x:
@@ -1908,10 +2040,34 @@ def build_clusters(df: pd.DataFrame, attributes: dict[str, dict[str, Any]], pair
         ra, rb = find(a), find(b)
         if ra != rb:
             parent[rb] = ra
+            members[ra].update(members.pop(rb))
 
-    for row in pair_rows:
-        if accepted_merge_edge(row):
-            union(row["product_id_a"], row["product_id_b"])
+    # Strongest decisions are applied first. Before every union the complete
+    # two clusters are checked, so an item with missing attributes cannot act
+    # as a bridge between two known, contradictory variants.
+    accepted_rows = sorted(
+        (row for row in pair_rows if accepted_merge_edge(row)),
+        key=lambda row: normalize_confidence(row.get("confidence")),
+        reverse=True,
+    )
+    for row in accepted_rows:
+        a_id, b_id = row["product_id_a"], row["product_id_b"]
+        if a_id not in parent or b_id not in parent:
+            continue
+        root_a, root_b = find(a_id), find(b_id)
+        if root_a == root_b:
+            continue
+        conflicts = cluster_variant_conflicts(
+            members[root_a],
+            members[root_b],
+            row_by_id,
+            attributes,
+        )
+        if conflicts:
+            row["cluster_merge_blocked"] = True
+            row["cluster_block_reasons"] = "; ".join(conflicts)
+            continue
+        union(a_id, b_id)
 
     groups = defaultdict(list)
     for pid in ids:
@@ -1919,7 +2075,7 @@ def build_clusters(df: pd.DataFrame, attributes: dict[str, dict[str, Any]], pair
 
     pair_by_cluster = defaultdict(list)
     for row in pair_rows:
-        if not accepted_merge_edge(row):
+        if not accepted_merge_edge(row) or row.get("cluster_merge_blocked"):
             continue
         root_a, root_b = find(row["product_id_a"]), find(row["product_id_b"])
         if root_a == root_b:
@@ -1936,7 +2092,208 @@ def build_clusters(df: pd.DataFrame, attributes: dict[str, dict[str, Any]], pair
     return clusters
 
 
+def cluster_variant_conflicts(
+    member_ids_a: set[str],
+    member_ids_b: set[str],
+    row_by_id: dict[str, dict[str, Any]],
+    attributes: dict[str, dict[str, Any]],
+) -> list[str]:
+    conflicts: list[str] = []
+    for a_id in member_ids_a:
+        for b_id in member_ids_b:
+            pair_conflicts = product_variant_conflicts(
+                row_by_id[a_id],
+                row_by_id[b_id],
+                attributes.get(a_id, {}),
+                attributes.get(b_id, {}),
+            )
+            for reason in pair_conflicts:
+                if reason not in conflicts:
+                    conflicts.append(reason)
+    return conflicts
+
+
+def product_variant_conflicts(
+    row_a: dict[str, Any],
+    row_b: dict[str, Any],
+    attr_a: dict[str, Any],
+    attr_b: dict[str, Any],
+) -> list[str]:
+    conflicts: list[str] = []
+    same_product_name = exact_product_name_key(row_a) == exact_product_name_key(row_b)
+
+    base_a, base_b = clean(attr_a.get("base_product")), clean(attr_b.get("base_product"))
+    if not same_product_name and base_a and base_b and base_a != base_b:
+        conflicts.append("different known base product")
+
+    temperature_a = explicit_temperature_state(row_a, attr_a)
+    temperature_b = explicit_temperature_state(row_b, attr_b)
+    if temperature_a and temperature_b and temperature_a != temperature_b:
+        conflicts.append("fresh vs frozen")
+
+    origin_a = canonical_origin_identity(get(row_a, "origin") or attr_a.get("origin"))
+    origin_b = canonical_origin_identity(get(row_b, "origin") or attr_b.get("origin"))
+    if origin_a and origin_b and not compatible_origin_identities(origin_a, origin_b):
+        conflicts.append("different known origin")
+
+    brand_a = verified_brand_identity(row_a)
+    brand_b = verified_brand_identity(row_b)
+    if brand_a and brand_b and brand_a != brand_b:
+        conflicts.append("different known brand")
+
+    variant_a, variant_b = clean(attr_a.get("variant")), clean(attr_b.get("variant"))
+    if variant_a and variant_b and variant_a != variant_b:
+        conflicts.append("different known variant")
+
+    premium_a = premium_variant_signals(row_a)
+    premium_b = premium_variant_signals(row_b)
+    if premium_a != premium_b and (premium_a or premium_b):
+        conflicts.append("premium line or breed differs")
+
+    processing_a = explicit_processing_identity(row_a, attr_a)
+    processing_b = explicit_processing_identity(row_b, attr_b)
+    if processing_a and processing_b and processing_a != processing_b:
+        conflicts.append("different known processing state")
+
+    quality_a, quality_b = clean(attr_a.get("quality_class")), clean(attr_b.get("quality_class"))
+    if quality_a and quality_b and quality_a != quality_b:
+        conflicts.append("different known quality class")
+
+    # Calibre, package size, packaging, price and validity are deliberately
+    # absent here: by business decision they are offer attributes, not variant
+    # separators.
+    return conflicts
+
+
+def explicit_temperature_state(row: dict[str, Any], attr: dict[str, Any]) -> str:
+    text = " ".join([
+        get(row, "category"),
+        get(row, "product") or get(row, "product_name"),
+        get(row, "description"),
+    ]).casefold()
+    if any(token in text for token in ["tiefkühl", "tiefkuehl", "gefroren", "frozen", " tk "]) or clean(get(row, "category")) == "tk":
+        return "frozen"
+    if any(token in text for token in ["frisch", "fresh", "gekühlt", "gekuehlt", "chilled"]):
+        return "fresh"
+    state = clean(attr.get("fresh_or_frozen"))
+    return state if state in {"fresh", "frozen"} and clean(attr.get("notes")) != "rule-based fallback" else ""
+
+
+ORIGIN_ADJECTIVE_CODES = {
+    "deutsch": "DE", "spanisch": "ES", "franzoesisch": "FR", "franzosisch": "FR",
+    "daenisch": "DK", "danisch": "DK", "irisch": "IE", "italienisch": "IT",
+    "polnisch": "PL", "rumaenisch": "RO", "rumanisch": "RO", "ukrainisch": "UA",
+    "argentinisch": "AR", "uruguayisch": "UY", "norwegisch": "NO",
+    "niederlaendisch": "NL", "hollaendisch": "NL", "neuseelaendisch": "NZ",
+    "australisch": "AU", "suedafrikanisch": "ZA", "chilenisch": "CL",
+}
+
+
+def canonical_origin_identity(value: Any) -> tuple[str, ...]:
+    text = str(value or "").strip()
+    if not text or clean(text) in {"unknown", "unbekannt", "none", "null"}:
+        return ()
+    converted = origin_country_codes(text)
+    converted_codes = [part.strip() for part in converted.split(",") if part.strip() in VALID_COUNTRY_CODES]
+    if converted_codes and len(", ".join(converted_codes)) == len(converted):
+        return tuple(sorted(set(converted_codes)))
+    normalized = normalize_country_alias(text)
+    adjective_codes = {
+        code
+        for stem, code in ORIGIN_ADJECTIVE_CODES.items()
+        if re.search(rf"(^| ){re.escape(stem)}[a-z]*($| )", normalized)
+    }
+    if adjective_codes:
+        return tuple(sorted(adjective_codes))
+    normalized = re.sub(r"\b(herkunft|origin|aus|from)\b", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return (f"text:{normalized}",) if normalized else ()
+
+
+def compatible_origin_identities(origin_a: tuple[str, ...], origin_b: tuple[str, ...]) -> bool:
+    if origin_a == origin_b:
+        return True
+    if len(origin_a) == len(origin_b) == 1 and origin_a[0].startswith("text:") and origin_b[0].startswith("text:"):
+        text_a, text_b = origin_a[0][5:], origin_b[0][5:]
+        return text_a in text_b or text_b in text_a
+    return False
+
+
+VERIFIED_BRAND_ALIASES = [
+    ("edeka foodservice", ["edeka foodservice"]),
+    ("metro professional", ["metro professional"]),
+    ("metro chef", ["metro chef"]),
+    ("aro", ["aro"]),
+    ("milram", ["milram"]),
+    ("schleiz", ["schleiz", "schleizer"]),
+    ("quality", ["quality"]),
+    ("economy", ["economy"]),
+    ("henkelmann", ["henkelmann"]),
+    ("meemken", ["meemken"]),
+    ("aviko", ["aviko"]),
+    ("foodservice", ["foodservice"]),
+    ("edeka", ["edeka"]),
+    ("metro", ["metro"]),
+    ("chef", ["chef"]),
+]
+
+
+def verified_brand_identity(row: dict[str, Any]) -> str:
+    explicit = duplicate_key_text(get(row, "brand"))
+    evidence = duplicate_key_text(" ".join([get(row, "product_name"), get(row, "product"), get(row, "description")]))
+    for canonical, aliases in VERIFIED_BRAND_ALIASES:
+        for alias in aliases:
+            pattern = rf"(^| ){re.escape(alias)}($| )"
+            if (explicit and re.search(pattern, explicit)) or re.search(pattern, evidence):
+                return canonical
+    return explicit
+
+
+def premium_variant_signals(row: dict[str, Any]) -> tuple[str, ...]:
+    text = duplicate_key_text(" ".join([get(row, "product_name"), get(row, "product"), get(row, "description")]))
+    signals = [
+        signal
+        for signal in ["duroc", "berkshire", "free range", "dry aged", "label rouge"]
+        if re.search(rf"(^| ){re.escape(signal)}($| )", text)
+    ]
+    return tuple(signals)
+
+
+def explicit_processing_identity(row: dict[str, Any], attr: dict[str, Any]) -> str:
+    text = normalize_country_alias(
+        " ".join([get(row, "product_name"), get(row, "product"), get(row, "description")])
+    )
+    signatures = [
+        ("dried", ["getrocknet", "dried"]),
+        ("pureed", ["passiert", "pueree", "puree"]),
+        ("smoked", ["gerauchert", "geraeuchert", "smoked"]),
+        ("marinated", ["mariniert", "marinated"]),
+        ("cooked", ["gekocht", "cooked"]),
+        ("cut", ["geschnitten", "gewurfelt", "gewuerfelt", "sliced", "diced"]),
+        ("peeled", ["geschalt", "geschaelt", "peeled"]),
+        ("unpeeled", ["ungeschalt", "ungeschaelt", "unpeeled"]),
+    ]
+    for identity, terms in signatures:
+        if any(term in text for term in terms):
+            return identity
+    processing = clean(attr.get("processing"))
+    return processing if processing not in {"", "unknown", "none", "null"} else ""
+
+
+def validate_cluster_partition(df: pd.DataFrame, clusters: list[dict[str, Any]]) -> None:
+    expected = df["product_id"].tolist()
+    assigned = [product_id for cluster in clusters for product_id in cluster["product_ids"]]
+    if len(assigned) != len(set(assigned)):
+        raise RuntimeError("Cluster validation failed: a product was assigned more than once")
+    if set(assigned) != set(expected):
+        missing = sorted(set(expected) - set(assigned))
+        extra = sorted(set(assigned) - set(expected))
+        raise RuntimeError(f"Cluster validation failed: missing={missing[:5]} extra={extra[:5]}")
+
+
 def accepted_merge_edge(row: dict[str, Any]) -> bool:
+    if row.get("candidate_source") == "same_supplier_exact_product_name" and row.get("supplier_a") == row.get("supplier_b"):
+        return True
     decision = row.get("decision")
     confidence = normalize_confidence(row.get("confidence"))
     review = bool(row.get("should_human_review"))
@@ -1947,9 +2304,14 @@ def accepted_merge_edge(row: dict[str, Any]) -> bool:
     )
 
 
-def build_output_rows(df: pd.DataFrame, attributes: dict[str, dict[str, Any]], pair_rows: list[dict[str, Any]], clusters: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def build_output_rows(
+    df: pd.DataFrame,
+    attributes: dict[str, dict[str, Any]],
+    pair_rows: list[dict[str, Any]],
+    clusters: list[dict[str, Any]],
+    grouping_audit: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     row_by_id = {row["product_id"]: row for row in df.to_dict("records")}
-    pair_by_cluster_id = {cluster["canonical_product_id"]: cluster["pair_edges"] for cluster in clusters}
     matched_rows = []
     review_rows = []
     for cluster in clusters:
@@ -1959,20 +2321,30 @@ def build_output_rows(df: pd.DataFrame, attributes: dict[str, dict[str, Any]], p
         suppliers = defaultdict(list)
         for product in products:
             suppliers[product["supplier_norm"]].append(product)
-        review_needed, review_reasons = cluster_review_reasons(products, attrs, cluster["pair_edges"], suppliers)
+        unique_suppliers = {
+            supplier: dedupe_supplier_offers(
+                supplier_products,
+                grouping_audit=grouping_audit,
+                cluster_id=cluster["canonical_product_id"],
+                supplier=supplier,
+            )
+            for supplier, supplier_products in suppliers.items()
+        }
+        unique_products = [product for supplier_products in unique_suppliers.values() for product in supplier_products]
+        review_needed, review_reasons = cluster_review_reasons(unique_products, attrs, cluster["pair_edges"], unique_suppliers)
         primary_attr = choose_primary_attr(attrs)
         matched = {
             "canonical_product_id": cluster["canonical_product_id"],
             "canonical_product_name": canonical_name,
-            "category": most_common([get(p, "category") for p in products]),
+            "category": most_common([get(p, "category") for p in unique_products]),
             "product": canonical_name,
-            "brand": most_common([get(p, "brand") for p in products]),
-            "description": most_common([get(p, "description") for p in products]),
+            "brand": choose_best_source_text([get(p, "brand") for p in unique_products]),
+            "description": choose_best_source_text([get(p, "description") for p in unique_products]),
             "base_product": primary_attr.get("base_product"),
             "variant": primary_attr.get("variant"),
             "processing": primary_attr.get("processing"),
             "quality_class": primary_attr.get("quality_class"),
-            "origin": most_common([get(p, "origin") for p in products]) or primary_attr.get("origin"),
+            "origin": choose_best_source_text([get(p, "origin") for p in unique_products]) or primary_attr.get("origin"),
             "packaging": primary_attr.get("packaging"),
             "unit_basis": primary_attr.get("unit_basis"),
             "match_confidence": cluster_confidence(cluster["pair_edges"]),
@@ -1980,12 +2352,205 @@ def build_output_rows(df: pd.DataFrame, attributes: dict[str, dict[str, Any]], p
             "match_reason": "; ".join(review_reasons) if review_reasons else "single product or accepted exact match",
         }
         for supplier in SUPPLIER_ORDER:
-            matched[supplier] = "\n\n".join(format_offer_cell(p) for p in suppliers.get(supplier, []))
-            matched[f"{supplier}_short"] = "\n".join(format_offer_cell_short(p) for p in suppliers.get(supplier, []))
+            offers = sorted(unique_suppliers.get(supplier, []), key=offer_sort_key)
+            matched[supplier] = "\n\n".join(format_offer_cell(p) for p in offers)
+            matched[f"{supplier}_short"] = "\n\n".join(format_offer_cell_short(p) for p in offers)
         matched_rows.append(matched)
         if review_needed:
             review_rows.append(make_review_row(cluster, canonical_name, products, review_reasons, cluster["pair_edges"]))
     return matched_rows, review_rows
+
+
+def dedupe_supplier_offers(
+    products: list[dict[str, Any]],
+    grouping_audit: list[dict[str, Any]] | None = None,
+    cluster_id: str = "",
+    supplier: str = "",
+) -> list[dict[str, Any]]:
+    parent = list(range(len(products)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        root_left, root_right = find(left), find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    exact_groups: dict[tuple[str, ...], list[int]] = defaultdict(list)
+    source_groups: dict[tuple[str, ...], list[int]] = defaultdict(list)
+    for index, product in enumerate(products):
+        exact_key = exact_commercial_offer_key(product)
+        if exact_key:
+            exact_groups[exact_key].append(index)
+        source_key = same_source_commercial_offer_key(product)
+        if source_key:
+            source_groups[source_key].append(index)
+    for indexes in exact_groups.values():
+        for index in indexes[1:]:
+            union(indexes[0], index)
+    for indexes in source_groups.values():
+        for position, left in enumerate(indexes):
+            for right in indexes[position + 1:]:
+                if compatible_offer_extraction_representations(products[left], products[right]):
+                    union(left, right)
+
+    components: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for index, product in enumerate(products):
+        components[find(index)].append(product)
+
+    unique_offers = []
+    for component in components.values():
+        merged = merge_offer_representations(component)
+        unique_offers.append(merged)
+        if grouping_audit is not None:
+            grouping_audit.append({
+                "cluster_id": cluster_id,
+                "supplier": supplier,
+                "rule": (
+                    "same commercial offer; source extraction representations coalesced"
+                    if len(component) > 1
+                    else "unique commercial offer"
+                ),
+                "kept_product_id": merged.get("product_id", ""),
+                "merged_product_ids": [item.get("product_id", "") for item in component],
+                "sources": [source_label(item) for item in component],
+                "price": get(merged, "price"),
+                "valid_from": get(merged, "valid_from"),
+                "valid_to": get(merged, "valid_to"),
+                "final_amount": amount_label(merged),
+            })
+    return unique_offers
+
+
+def validate_offer_accounting(df: pd.DataFrame, audit_rows: list[dict[str, Any]]) -> None:
+    expected = set(df["product_id"].tolist())
+    accounted = [
+        product_id
+        for row in audit_rows
+        for product_id in row.get("merged_product_ids", [])
+        if product_id
+    ]
+    if len(accounted) != len(set(accounted)):
+        raise RuntimeError("Offer accounting failed: an input row is represented by more than one output offer")
+    if set(accounted) != expected:
+        missing = sorted(expected - set(accounted))
+        extra = sorted(set(accounted) - expected)
+        raise RuntimeError(f"Offer accounting failed: missing={missing[:5]} extra={extra[:5]}")
+
+
+def exact_commercial_offer_key(product: dict[str, Any]) -> tuple[str, ...] | None:
+    price = duplicate_key_number(get(product, "price"))
+    valid_from = str(get(product, "valid_from")).strip()
+    valid_to = str(get(product, "valid_to")).strip()
+    if not price or not (valid_from or valid_to):
+        return None
+    return (
+        normalize_supplier(get(product, "supplier_norm") or get(product, "supplier")),
+        exact_product_name_key(product),
+        price,
+        duplicate_key_number(get(product, "quantity")),
+        duplicate_key_text(get(product, "unit")),
+        duplicate_key_number(get(product, "price_per_kg")),
+        duplicate_key_price_tiers(get(product, "price_tiers")),
+        valid_from,
+        valid_to,
+    )
+
+
+def same_source_commercial_offer_key(product: dict[str, Any]) -> tuple[str, ...] | None:
+    source_file = duplicate_key_text(get(product, "source_file"))
+    source_page = duplicate_key_text(get(product, "source_page"))
+    price = duplicate_key_number(get(product, "price"))
+    valid_from = str(get(product, "valid_from")).strip()
+    valid_to = str(get(product, "valid_to")).strip()
+    if not all([source_file, source_page, price]) or not (valid_from or valid_to):
+        return None
+    return (
+        normalize_supplier(get(product, "supplier_norm") or get(product, "supplier")),
+        exact_product_name_key(product),
+        source_file,
+        source_page,
+        price,
+        valid_from,
+        valid_to,
+    )
+
+
+def compatible_offer_extraction_representations(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> bool:
+    optional_fields = [
+        (duplicate_key_number(get(left, "quantity")), duplicate_key_number(get(right, "quantity"))),
+        (duplicate_key_text(get(left, "unit")), duplicate_key_text(get(right, "unit"))),
+        (duplicate_key_number(get(left, "price_per_kg")), duplicate_key_number(get(right, "price_per_kg"))),
+        (duplicate_key_price_tiers(get(left, "price_tiers")), duplicate_key_price_tiers(get(right, "price_tiers"))),
+    ]
+    return all(not left_value or not right_value or left_value == right_value for left_value, right_value in optional_fields)
+
+
+def merge_offer_representations(products: list[dict[str, Any]]) -> dict[str, Any]:
+    ranked = sorted(products, key=offer_representation_rank, reverse=True)
+    merged = dict(ranked[0])
+    for field in ["product", "product_name", "brand", "description", "origin"]:
+        best = choose_best_source_text([get(product, field) for product in products])
+        if best:
+            merged[field] = best
+    amount_source = max(products, key=amount_representation_rank)
+    if get(amount_source, "quantity") or get(amount_source, "unit"):
+        merged["quantity"] = get(amount_source, "quantity")
+        merged["unit"] = get(amount_source, "unit")
+    merged["_merged_product_ids"] = [product.get("product_id", "") for product in products]
+    merged["_merged_sources"] = [source_label(product) for product in products]
+    return merged
+
+
+def offer_representation_rank(product: dict[str, Any]) -> tuple[int, int, int, int, int]:
+    confidence = int(to_float(product.get("extraction_confidence")) or 0)
+    return (
+        bool(get(product, "description")),
+        len(duplicate_key_text(get(product, "description")).split()),
+        bool(get(product, "origin")),
+        bool(get(product, "brand")),
+        amount_representation_rank(product)[0] * 1000 + confidence,
+    )
+
+
+def amount_representation_rank(product: dict[str, Any]) -> tuple[int, int, int]:
+    quantity = get(product, "quantity")
+    unit = get(product, "unit")
+    return (
+        int(bool(quantity)) + int(bool(unit)),
+        int(to_float(quantity) is not None),
+        len(duplicate_key_text(unit)),
+    )
+
+
+def choose_best_source_text(values: list[Any]) -> str:
+    candidates = [str(value).strip() for value in values if str(value or "").strip()]
+    if not candidates:
+        return ""
+    return max(
+        candidates,
+        key=lambda value: (
+            len(set(duplicate_key_text(value).split())),
+            len(duplicate_key_text(value)),
+            value,
+        ),
+    )
+
+
+def offer_sort_key(product: dict[str, Any]) -> tuple:
+    return (
+        parse_date(get(product, "valid_from")) or date.min,
+        parse_date(get(product, "valid_to")) or date.min,
+        to_float(product.get("price")) if to_float(product.get("price")) is not None else math.inf,
+        amount_label(product),
+    )
 
 
 def choose_canonical_name(cluster: dict[str, Any], attrs: list[dict[str, Any]]) -> str:
@@ -2034,8 +2599,6 @@ def cluster_confidence(edges: list[dict[str, Any]]) -> int:
 
 def cluster_review_reasons(products: list[dict[str, Any]], attrs: list[dict[str, Any]], edges: list[dict[str, Any]], suppliers: dict[str, list[dict[str, Any]]]) -> tuple[bool, list[str]]:
     reasons = []
-    if any(len(items) > 1 for items in suppliers.values()):
-        reasons.append("multiple products from same supplier")
     if any(e.get("decision") == "close_comparable" and e.get("should_human_review") for e in edges):
         reasons.append("close comparable match needs review")
     if any(normalize_confidence(e.get("confidence")) < 80 and e.get("should_human_review") for e in edges):
@@ -2385,7 +2948,15 @@ COUNTRY_CODE_BY_ALIAS = {
 COUNTRY_ALIAS_PATTERNS = sorted(COUNTRY_CODE_BY_ALIAS.items(), key=lambda item: len(item[0]), reverse=True)
 
 
-def write_excel(output_path: Path, matched_rows: list[dict[str, Any]], review_rows: list[dict[str, Any]], pair_rows: list[dict[str, Any]], attribute_rows: list[dict[str, Any]], logo_path: Path | None = None) -> None:
+def write_excel(
+    output_path: Path,
+    matched_rows: list[dict[str, Any]],
+    review_rows: list[dict[str, Any]],
+    pair_rows: list[dict[str, Any]],
+    attribute_rows: list[dict[str, Any]],
+    logo_path: Path | None = None,
+    offer_grouping_audit: list[dict[str, Any]] | None = None,
+) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True) if output_path.parent != Path(".") else None
     wb = Workbook()
     ws = wb.active
@@ -2405,9 +2976,23 @@ def write_excel(output_path: Path, matched_rows: list[dict[str, Any]], review_ro
     write_sheet(wb.create_sheet("matched_products"), matched_rows, MATCHED_COLUMNS)
     write_sheet(wb.create_sheet("review_queue"), review_rows, REVIEW_COLUMNS)
     write_sheet(wb.create_sheet("pair_debug"), pair_rows, PAIR_COLUMNS)
+    write_sheet(
+        wb.create_sheet("offer_grouping_audit"),
+        offer_grouping_audit or [],
+        OFFER_GROUPING_AUDIT_COLUMNS,
+    )
     attr_columns = list(attribute_rows[0].keys()) if attribute_rows else []
     write_sheet(wb.create_sheet("attribute_debug"), attribute_rows, attr_columns)
     wb.save(output_path)
+
+
+def write_offer_grouping_audit(output_path: Path, audit_rows: list[dict[str, Any]]) -> Path:
+    audit_path = output_path.with_name(f"{output_path.stem}_offer_grouping_audit.jsonl")
+    with audit_path.open("w", encoding="utf-8") as handle:
+        for row in audit_rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    print(f"Offer grouping audit written: {audit_path}")
+    return audit_path
 
 
 def output_week_label(output_path: Path) -> str:
@@ -2733,14 +3318,26 @@ PAIR_COLUMNS = [
     "similarity", "hard_blocked", "block_reasons", "soft_warnings", "decision",
     "confidence", "canonical_name", "reason", "conflicting_attributes",
     "should_human_review", "second_judge_action", "second_judge_confidence", "second_judge_reason",
+    "cluster_merge_blocked", "cluster_block_reasons",
+]
+
+OFFER_GROUPING_AUDIT_COLUMNS = [
+    "cluster_id", "supplier", "rule", "kept_product_id", "merged_product_ids",
+    "sources", "price", "valid_from", "valid_to", "final_amount",
 ]
 
 
 def write_sheet(ws, rows: list[dict[str, Any]], columns: list[str]) -> None:
     ws.append(columns)
     for row in rows:
-        ws.append([row.get(col, "") for col in columns])
+        ws.append([excel_cell_value(row.get(col, "")) for col in columns])
     style_sheet(ws, len(rows), len(columns))
+
+
+def excel_cell_value(value: Any) -> Any:
+    if isinstance(value, (list, dict, tuple, set)):
+        return json.dumps(list(value) if isinstance(value, set) else value, ensure_ascii=False)
+    return value
 
 
 def style_sheet(ws, row_count: int, col_count: int) -> None:
