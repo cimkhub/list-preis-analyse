@@ -159,6 +159,10 @@ PREPARED_FISH_PATTERNS = [
 ]
 
 
+class DeepSeekOutputTruncatedError(RuntimeError):
+    """Raised when DeepSeek exhausts its output budget before returning a label."""
+
+
 def load_env_file(path: Path) -> None:
     if load_dotenv is not None:
         load_dotenv(path, override=False)
@@ -308,7 +312,8 @@ def extract_response_text(response_json: dict[str, Any]) -> str:
         detail = f" finish_reason={finish_reason!r}" if finish_reason else ""
         if reasoning_content:
             detail += f"; reasoning_without_final={reasoning_content[:120]!r}"
-        raise RuntimeError(f"DeepSeek response did not contain text content.{detail}")
+        error_type = DeepSeekOutputTruncatedError if finish_reason == "length" else RuntimeError
+        raise error_type(f"DeepSeek response did not contain text content.{detail}")
     return content
 
 
@@ -697,6 +702,14 @@ def classify_row(
             raw_text = extract_response_text(response_json)
             label, reason = normalize_classification(raw_text)
             return index, label, reason
+        except DeepSeekOutputTruncatedError as exc:
+            LOGGER.warning(
+                "DeepSeek output truncated for row=%d product=%s; defaulting to Ja: %s",
+                index + 1,
+                product_name,
+                exc,
+            )
+            return index, "Ja", "LLM Fallback"
         except Exception as exc:
             if attempt >= max_retries:
                 raise RuntimeError(

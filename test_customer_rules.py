@@ -1,3 +1,4 @@
+import classify_fresh_food_relevance as relevance
 from classify_fresh_food_relevance import build_prompt, classify_row, explicit_non_fresh_exclusion_reason
 from src.harmonize.customer_rules import (
     apply_customer_category_overrides,
@@ -72,6 +73,38 @@ def test_classify_row_applies_non_fresh_exclusions_before_core_category():
     assert index == 0
     assert label == "Nein"
     assert reason == "Prepared Fish"
+
+
+def test_classify_row_defaults_to_yes_when_deepseek_output_is_truncated(monkeypatch):
+    monkeypatch.setattr(
+        relevance,
+        "call_deepseek",
+        lambda **_kwargs: {
+            "choices": [
+                {
+                    "finish_reason": "length",
+                    "message": {
+                        "content": "",
+                        "reasoning_content": "The output budget ended before the final answer.",
+                    },
+                }
+            ]
+        },
+    )
+
+    index, label, reason = classify_row(
+        150,
+        {"category": "sonstiges", "product_name": "Paprikastreifen- oder Würfel-Mix"},
+        api_key="unused",
+        model="deepseek-v4-flash",
+        base_url="https://unused.invalid",
+        timeout_seconds=1,
+        max_retries=3,
+    )
+
+    assert index == 150
+    assert label == "Ja"
+    assert reason == "LLM Fallback"
 
 
 def test_relevance_prompt_mentions_customer_feedback_negative_examples():
