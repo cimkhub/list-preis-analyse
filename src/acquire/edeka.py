@@ -87,7 +87,7 @@ class EdekaScraper(BaseScraper):
         self._apply_brochure_selection(brochures)
 
         logger.info(
-            "EDEKA visible brochure cards: %s",
+            "EDEKA brochure variants for visible cards: %s",
             ", ".join(
                 f"{tab}={sum(1 for entry in brochures if entry['tab'] == tab)}"
                 for tab in TARGET_TABS
@@ -163,6 +163,12 @@ class EdekaScraper(BaseScraper):
     def _apply_brochure_selection(self, brochures: list[dict]) -> None:
         grouped: dict[tuple, list[dict]] = {}
         for brochure in brochures:
+            # Regional copies must reach the market-scope relevance check intact.
+            if self._brochure_family(brochure) == "region":
+                if brochure.get("skip_reason") == "duplicate_region_copy":
+                    brochure["selected"] = brochure.get("tab") in TARGET_TABS
+                    brochure["skip_reason"] = None if brochure["selected"] else "ignored_tab"
+                continue
             grouped.setdefault(self._brochure_group_key(brochure), []).append(brochure)
 
         for group in grouped.values():
@@ -341,6 +347,8 @@ class EdekaScraper(BaseScraper):
         for pdf_path in sorted(data_dir.glob("*.pdf")):
             meta = self._parse_duplicate_filename(pdf_path.name)
             if not meta:
+                continue
+            if meta["family"] == "region":
                 continue
             grouped.setdefault(
                 (meta["year"], meta["calendar_week"], meta["family"]),
@@ -614,21 +622,27 @@ class EdekaScraper(BaseScraper):
                 )
                 continue
 
-            brochure = dict(candidates[0])
-            if visible.get("download_url"):
-                brochure["download_url"] = visible["download_url"]
-            if visible.get("viewer_url"):
-                brochure["viewer_url"] = visible["viewer_url"]
-            key = (
-                brochure.get("tab"),
-                brochure.get("title"),
-                brochure.get("valid_from"),
-                brochure.get("valid_to"),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            matched.append(brochure)
+            regional = [item for item in candidates if self._brochure_family(item) == "region"]
+            for candidate in regional or candidates[:1]:
+                brochure = dict(candidate)
+                # Keep each regional entry's own URLs, even if the visible card
+                # exposes a link to just one of those regional editions.
+                if not regional:
+                    if visible.get("download_url"):
+                        brochure["download_url"] = visible["download_url"]
+                    if visible.get("viewer_url"):
+                        brochure["viewer_url"] = visible["viewer_url"]
+                key = (
+                    brochure.get("tab"),
+                    brochure.get("title"),
+                    brochure.get("valid_from"),
+                    brochure.get("valid_to"),
+                    brochure.get("download_url") or brochure.get("viewer_url"),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                matched.append(brochure)
 
         return matched
 

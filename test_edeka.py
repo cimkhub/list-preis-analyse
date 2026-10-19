@@ -222,3 +222,52 @@ def test_match_visible_brochures_reduces_to_visible_main_page_cards():
     assert len(matched) == 2
     assert {item["tab"] for item in matched} == {"Aktuell", "Demnächst"}
     assert {item["title"] for item in matched} == {"Aktuell [Nord]"}
+
+
+def regional_brochures(scraper):
+    original = scraper._parse_brochure_preview(FIXTURE_HTML, scraper.config["url"])[0]
+    return [
+        {
+            **original,
+            "download_url": f"https://www.edeka-foodservice.de/dam/jcr:test/efs-2026-kw14-aktuell-basis-nord-region-{region}.pdf",
+            "viewer_url": f"https://werbung.edeka-foodservice.de/html5/efs_2026_kw14_aktuell_basis_nord_region_{region}/index.html",
+        }
+        for region in (2, 3, 5, 8, 9)
+    ]
+
+
+def test_visible_card_keeps_all_regions_with_their_own_links():
+    scraper = make_scraper()
+    brochures = regional_brochures(scraper)
+    visible = dict(brochures[1])  # Wernigerode links to region 3.
+
+    matched = scraper._match_visible_brochures(brochures, [visible, visible])
+    scraper._apply_brochure_selection(matched)
+
+    assert len(matched) == 5
+    assert all(item["selected"] for item in matched)
+    assert [item["download_url"] for item in matched] == [item["download_url"] for item in brochures]
+    assert [item["viewer_url"] for item in matched] == [item["viewer_url"] for item in brochures]
+
+
+def test_acquisition_and_cache_preserve_all_regional_files(tmp_path, monkeypatch):
+    scraper = make_scraper()
+    brochures = regional_brochures(scraper)
+    monkeypatch.setattr(scraper, "_fetch_offers_page", lambda url: FIXTURE_HTML)
+    monkeypatch.setattr(scraper, "_parse_brochure_preview", lambda html, url: brochures)
+    monkeypatch.setattr(scraper, "_discover_visible_brochures", lambda url: [dict(brochures[1])])
+
+    def download(session, brochure, data_dir):
+        path = data_dir / brochure["download_url"].rsplit("/", 1)[-1]
+        path.write_bytes(b"%PDF-1.4\n")
+        return path
+
+    monkeypatch.setattr(scraper, "_download_pdf_entry", download)
+    acquired = scraper._scrape_and_download(14, 2026, tmp_path)
+    cached = scraper._load_cached_brochures(tmp_path, 14, 2026)
+
+    assert len(acquired) == len(cached) == 5
+    assert {item.file_path for item in acquired} == {item.file_path for item in cached}
+    assert all(item.file_path and edeka_module.Path(item.file_path).exists() for item in cached)
+    metadata = json.loads((tmp_path / "raw_brochures.json").read_text())
+    assert all(item["selected"] and item["pdf_status"] == "downloaded" for item in metadata)
